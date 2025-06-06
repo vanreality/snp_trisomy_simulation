@@ -750,11 +750,11 @@ def run_simulation(args: Tuple) -> None:
         )
         
         if not trisomy_simulated_df.empty:
-            trisomy_output_path = Path(output_dir) / f"trisomy_{depth}_{ff:.4f}_{repeat_idx}.tsv"
+            trisomy_output_path = Path(output_dir) / f"trisomy_{depth}_{ff:.3f}_{repeat_idx}.tsv"
             trisomy_simulated_df.to_csv(trisomy_output_path, sep='\t', index=False, header=True)
             
     except Exception as e:
-        console.print(f"[red]Error in simulation for depth={depth}, ff={ff:.4f}, repeat={repeat_idx}: {e}[/red]")
+        console.print(f"[red]Error in simulation for depth={depth}, ff={ff:.3f}, repeat={repeat_idx}: {e}[/red]")
 
 
 def load_snp_data(file_path: Path) -> pd.DataFrame:
@@ -820,7 +820,7 @@ def load_snp_data(file_path: Path) -> pd.DataFrame:
         
         for stat, value in af_stats.items():
             if isinstance(value, float):
-                table.add_row(stat, f"{value:.4f}")
+                table.add_row(stat, f"{value:.3f}")
             else:
                 table.add_row(stat, str(value))
         
