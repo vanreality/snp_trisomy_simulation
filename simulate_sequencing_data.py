@@ -741,7 +741,7 @@ def run_simulation(args: Tuple) -> None:
         )
         
         if not disomy_simulated_df.empty:
-            disomy_output_path = Path(output_dir) / f"disomy_{depth}_{ff:.4f}_{repeat_idx}.tsv"
+            disomy_output_path = Path(output_dir) / f"disomy_{depth}_{ff:.3f}_{repeat_idx}.tsv"
             disomy_simulated_df.to_csv(disomy_output_path, sep='\t', index=False, header=True)
         
         # Run trisomy simulation
