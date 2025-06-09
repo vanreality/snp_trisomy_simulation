@@ -59,8 +59,8 @@ def estimate_fetal_fraction(
             - 'chr': chromosome identifier (string or int)
             - 'pos': genomic position (int)
             - 'af': population allele frequency (float in [0,1])
-            - 'ref_reads': number of reference allele reads (int >= 0)
-            - 'alt_reads': number of alternative allele reads (int >= 0)
+            - 'cfDNA_ref_reads': number of reference allele reads (int >= 0)
+            - 'cfDNA_alt_reads': number of alternative allele reads (int >= 0)
         f_min (float, optional): Minimum fetal fraction to search. Defaults to 0.001.
         f_max (float, optional): Maximum fetal fraction to search. Defaults to 0.5.
         f_step (float, optional): Step size for grid search. Defaults to 0.001.
@@ -75,7 +75,7 @@ def estimate_fetal_fraction(
         ValueError: If search parameters are invalid (f_min >= f_max, negative values, etc.)
     """
     # Input validation
-    required_columns = {'chr', 'pos', 'af', 'ref_reads', 'alt_reads'}
+    required_columns = {'chr', 'pos', 'af', 'cfDNA_ref_reads', 'cfDNA_alt_reads'}
     if not required_columns.issubset(background_chr_df.columns):
         missing_cols = required_columns - set(background_chr_df.columns)
         raise ValueError(f"Missing required columns: {missing_cols}")
@@ -129,13 +129,13 @@ def estimate_fetal_fraction(
         df_clean = df_clean[~invalid_af]
     
     # Validate read counts
-    invalid_reads = (df_clean['ref_reads'] < 0) | (df_clean['alt_reads'] < 0)
+    invalid_reads = (df_clean['cfDNA_ref_reads'] < 0) | (df_clean['cfDNA_alt_reads'] < 0)
     if invalid_reads.any():
         console.print(f"[yellow]Warning: Removing {invalid_reads.sum()} SNPs with negative read counts[/yellow]")
         df_clean = df_clean[~invalid_reads]
     
     # Filter out SNPs with zero coverage
-    df_clean['total_reads'] = df_clean['ref_reads'] + df_clean['alt_reads']
+    df_clean['total_reads'] = df_clean['cfDNA_ref_reads'] + df_clean['cfDNA_alt_reads']
     zero_coverage = df_clean['total_reads'] == 0
     if zero_coverage.any():
         console.print(f"[yellow]Warning: Removing {zero_coverage.sum()} SNPs with zero coverage[/yellow]")
@@ -146,8 +146,8 @@ def estimate_fetal_fraction(
     
     # Convert to numpy arrays for performance
     p_arr = df_clean['af'].to_numpy(dtype=np.float64)
-    ref_arr = df_clean['ref_reads'].to_numpy(dtype=np.int32)
-    alt_arr = df_clean['alt_reads'].to_numpy(dtype=np.int32)
+    ref_arr = df_clean['cfDNA_ref_reads'].to_numpy(dtype=np.int32)
+    alt_arr = df_clean['cfDNA_alt_reads'].to_numpy(dtype=np.int32)
     n_arr = ref_arr + alt_arr
     
     num_snps = len(p_arr)
@@ -236,8 +236,8 @@ def LR_calculator(input_df: pd.DataFrame, fetal_fraction: float) -> float:
             - 'chr': chromosome identifier (string or int)
             - 'pos': genomic position (int)
             - 'af': population allele frequency (float in [0,1])
-            - 'ref_reads': number of reference allele reads (int >= 0)
-            - 'alt_reads': number of alternative allele reads (int >= 0)
+            - 'cfDNA_ref_reads': number of reference allele reads (int >= 0)
+            - 'cfDNA_alt_reads': number of alternative allele reads (int >= 0)
         fetal_fraction (float): Estimated fetal fraction in maternal plasma (0 < ff < 1)
     
     Returns:
@@ -250,7 +250,7 @@ def LR_calculator(input_df: pd.DataFrame, fetal_fraction: float) -> float:
         ValueError: If no valid SNPs are found
     """
     # Input validation
-    required_cols = {'chr', 'pos', 'af', 'ref_reads', 'alt_reads'}
+    required_cols = {'chr', 'pos', 'af', 'cfDNA_ref_reads', 'cfDNA_alt_reads'}
     if not required_cols.issubset(input_df.columns):
         missing = required_cols - set(input_df.columns)
         raise ValueError(f"Input DataFrame is missing required columns: {missing}")
@@ -267,8 +267,8 @@ def LR_calculator(input_df: pd.DataFrame, fetal_fraction: float) -> float:
     # Remove SNPs with invalid data
     invalid_mask = (
         (df_clean['af'] < 0) | (df_clean['af'] > 1) |
-        (df_clean['ref_reads'] < 0) | (df_clean['alt_reads'] < 0) |
-        ((df_clean['ref_reads'] + df_clean['alt_reads']) == 0)
+        (df_clean['cfDNA_ref_reads'] < 0) | (df_clean['cfDNA_alt_reads'] < 0) |
+        ((df_clean['cfDNA_ref_reads'] + df_clean['cfDNA_alt_reads']) == 0)
     )
     
     if invalid_mask.any():
@@ -408,8 +408,8 @@ def LR_calculator(input_df: pd.DataFrame, fetal_fraction: float) -> float:
         
         for idx, snp in df_clean.iterrows():
             # Extract observed data
-            ref_count = int(snp['ref_reads'])
-            alt_count = int(snp['alt_reads'])
+            ref_count = int(snp['cfDNA_ref_reads'])
+            alt_count = int(snp['cfDNA_alt_reads'])
             depth = ref_count + alt_count
             af = float(snp['af'])
             
@@ -549,7 +549,7 @@ def main(
     and calculate likelihood ratios for trisomy detection across chromosomes.
     
     The input file should be a TSV.GZ file with columns:
-    chr, pos, af, ref_reads, alt_reads
+    chr, pos, af, cfDNA_ref_reads, cfDNA_alt_reads
     
     Results are saved as TSV files with fetal fraction estimates and likelihood ratios.
     """
@@ -704,7 +704,7 @@ def load_and_validate_data(input_path: Path) -> pd.DataFrame:
         raise ValueError(f"Failed to load input file: {str(e)}")
     
     # Validate required columns
-    required_columns = {'chr', 'pos', 'af', 'ref_reads', 'alt_reads'}
+    required_columns = {'chr', 'pos', 'af', 'cfDNA_ref_reads', 'cfDNA_alt_reads'}
     if not required_columns.issubset(df.columns):
         missing = required_columns - set(df.columns)
         raise ValueError(f"Missing required columns: {missing}")
@@ -716,14 +716,14 @@ def load_and_validate_data(input_path: Path) -> pd.DataFrame:
     # Ensure proper data types
     df['pos'] = pd.to_numeric(df['pos'], errors='coerce')
     df['af'] = pd.to_numeric(df['af'], errors='coerce')
-    df['ref_reads'] = pd.to_numeric(df['ref_reads'], errors='coerce', downcast='integer')
-    df['alt_reads'] = pd.to_numeric(df['alt_reads'], errors='coerce', downcast='integer')
+    df['cfDNA_ref_reads'] = pd.to_numeric(df['cfDNA_ref_reads'], errors='coerce', downcast='integer')
+    df['cfDNA_alt_reads'] = pd.to_numeric(df['cfDNA_alt_reads'], errors='coerce', downcast='integer')
     
     # Remove rows with invalid data
     invalid_mask = (
-        df['af'].isna() | df['ref_reads'].isna() | df['alt_reads'].isna() |
+        df['af'].isna() | df['cfDNA_ref_reads'].isna() | df['cfDNA_alt_reads'].isna() |
         (df['af'] < 0) | (df['af'] > 1) |
-        (df['ref_reads'] < 0) | (df['alt_reads'] < 0)
+        (df['cfDNA_ref_reads'] < 0) | (df['cfDNA_alt_reads'] < 0)
     )
     
     if invalid_mask.any():
