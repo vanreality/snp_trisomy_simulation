@@ -345,7 +345,7 @@ def LR_calculator(input_df: pd.DataFrame, fetal_fraction: float) -> float:
     # ----------------------------
     # Input validation
     # ----------------------------
-    required_cols = {'chr', 'pos', 'af', 'ref_reads', 'alt_reads'}
+    required_cols = {'chr', 'pos', 'af', 'cfDNA_ref_reads', 'cfDNA_alt_reads'}
     if not required_cols.issubset(input_df.columns):
         missing = required_cols - set(input_df.columns)
         raise ValueError(f"Input DataFrame is missing required columns: {missing}")
@@ -356,7 +356,7 @@ def LR_calculator(input_df: pd.DataFrame, fetal_fraction: float) -> float:
 
     # Validate SNP numbers
     if input_df.shape[0] == 0:
-        raise ValueError(f"No SNPs found on chromosome '{trisomy_chr}' in input_df.")
+        raise ValueError(f"No SNPs found on target chromosome in input_df.")
 
     # ----------------------------
     # Main likelihood computation
