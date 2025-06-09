@@ -548,8 +548,8 @@ def LR_calculator(input_df: pd.DataFrame, fetal_fraction: float) -> float:
                             continue
                         log_p_fd = math.log(p_fd)
                         
-                        p_alt_exp_tri = ((1.0 - fetal_fraction) * (d_maternal / 2.0) + 
-                                       fetal_fraction * (d_fetal / 3.0))
+                        p_alt_exp_tri = ((1.0 - 1.5 * fetal_fraction) * (d_maternal / 2.0) + 
+                                       1.5 * fetal_fraction * (d_fetal / 3.0))
                         
                         log_p_obs_tri = log_binomial_pmf(alt_count, depth, p_alt_exp_tri)
                         if log_p_obs_tri != float('-inf'):
