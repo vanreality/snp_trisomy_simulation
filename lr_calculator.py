@@ -37,11 +37,92 @@ from rich import print as rprint
 console = Console()
 
 
+# Global helper functions for multiprocessing (need to be at module level)
+def _log_binomial_coeff_global(n: int, k: int) -> float:
+    """Compute log(C(n,k)) using log-gamma function for numerical stability."""
+    if k < 0 or k > n or n < 0:
+        return float('-inf')
+    if k == 0 or k == n:
+        return 0.0
+    return (math.lgamma(n + 1) - math.lgamma(k + 1) - math.lgamma(n - k + 1))
+
+
+def _log_binomial_pmf_global(k: int, n: int, p: float) -> float:
+    """Compute log-probability mass function of Binomial(n, p) at k."""
+    if n < 0 or k < 0 or k > n:
+        return float('-inf')
+    if p <= 0.0:
+        return 0.0 if k == 0 else float('-inf')
+    if p >= 1.0:
+        return 0.0 if k == n else float('-inf')
+    
+    log_coeff = _log_binomial_coeff_global(n, k)
+    return log_coeff + k * math.log(p) + (n - k) * math.log(1 - p)
+
+
+def _log_sum_exp_global(log_values: np.ndarray) -> float:
+    """Compute log(sum(exp(x_i))) for numerical stability."""
+    if len(log_values) == 0:
+        return float('-inf')
+    max_val = np.max(log_values)
+    if max_val == float('-inf'):
+        return float('-inf')
+    return max_val + math.log(np.sum(np.exp(log_values - max_val)))
+
+
+def _compute_ff_likelihood_chunk(args: Tuple) -> Dict[float, float]:
+    """
+    Worker function to compute log-likelihood for a chunk of fetal fraction values.
+    
+    This function processes a subset of FF values in parallel to speed up computation.
+    
+    Args:
+        args: Tuple containing (f_values_chunk, shared_data)
+            - f_values_chunk: Array of FF values to process
+            - shared_data: Tuple of (p_arr, n_arr, alt_arr, log_prior_G, maternal_alt_frac, fetal_alt_frac)
+    
+    Returns:
+        Dictionary mapping FF values to their computed log-likelihoods
+    """
+    f_values_chunk, shared_data = args
+    p_arr, n_arr, alt_arr, log_prior_G, maternal_alt_frac, fetal_alt_frac = shared_data
+    
+    chunk_results = {}
+    num_snps = len(p_arr)
+    
+    for FF in f_values_chunk:
+        total_log_lik = 0.0
+        
+        # Process each SNP for this FF value
+        for i in range(num_snps):
+            n_i = n_arr[i]
+            k_i = alt_arr[i]
+            
+            # Compute mixture probabilities for all genotypes
+            mu_values = (1 - FF) * maternal_alt_frac + FF * fetal_alt_frac[i, :]
+            
+            # Compute log probabilities for each genotype
+            log_probs = np.zeros(3)
+            for g in range(3):
+                mu_g = mu_values[g]
+                log_pmf = _log_binomial_pmf_global(k_i, n_i, mu_g)
+                log_probs[g] = log_prior_G[i, g] + log_pmf
+            
+            # Use log-sum-exp to compute log-likelihood for this SNP
+            log_L_i = _log_sum_exp_global(log_probs)
+            total_log_lik += log_L_i
+        
+        chunk_results[FF] = total_log_lik
+    
+    return chunk_results
+
+
 def estimate_fetal_fraction(
     background_chr_df: pd.DataFrame, 
     f_min: float = 0.001, 
     f_max: float = 0.5, 
-    f_step: float = 0.001
+    f_step: float = 0.001,
+    ncpus: int = cpu_count()
 ) -> Tuple[float, Dict[float, float]]:
     """
     Estimate fetal fraction (FF) from maternal cfDNA SNP read counts using maximum likelihood estimation.
@@ -61,9 +142,10 @@ def estimate_fetal_fraction(
             - 'af': population allele frequency (float in [0,1])
             - 'cfDNA_ref_reads': number of reference allele reads (int >= 0)
             - 'cfDNA_alt_reads': number of alternative allele reads (int >= 0)
-        f_min (float, optional): Minimum fetal fraction to search. Defaults to 0.001.
-        f_max (float, optional): Maximum fetal fraction to search. Defaults to 0.5.
-        f_step (float, optional): Step size for grid search. Defaults to 0.001.
+                 f_min (float, optional): Minimum fetal fraction to search. Defaults to 0.001.
+         f_max (float, optional): Maximum fetal fraction to search. Defaults to 0.5.
+         f_step (float, optional): Step size for grid search. Defaults to 0.001.
+         ncpus (int, optional): Number of CPU cores to use. Defaults to cpu_count().
     
     Returns:
         Tuple[float, Dict[float, float]]: A tuple containing:
@@ -178,6 +260,18 @@ def estimate_fetal_fraction(
     f_values = np.arange(f_min, f_max + f_step, f_step)
     log_likelihoods = {}
     
+    console.print(f"[cyan]Using {ncpus} CPU cores for parallel processing[/cyan]")
+    
+    # Prepare shared data for worker processes
+    shared_data = (p_arr, n_arr, alt_arr, log_prior_G, maternal_alt_frac, fetal_alt_frac)
+    
+    # Split FF values into chunks for parallel processing
+    chunk_size = max(1, len(f_values) // ncpus)
+    f_value_chunks = [f_values[i:i + chunk_size] for i in range(0, len(f_values), chunk_size)]
+    
+    # Prepare arguments for worker processes
+    worker_args = [(chunk, shared_data) for chunk in f_value_chunks]
+    
     # Progress bar for fetal fraction estimation
     with Progress(
         TextColumn("[progress.description]{task.description}"),
@@ -186,32 +280,28 @@ def estimate_fetal_fraction(
         TimeElapsedColumn(),
         console=console
     ) as progress:
-        task = progress.add_task("Estimating fetal fraction...", total=len(f_values))
+        task = progress.add_task("Estimating fetal fraction...", total=len(f_value_chunks))
         
-        for FF in f_values:
-            total_log_lik = 0.0
-            
-            # Vectorized computation where possible
-            for i in range(num_snps):
-                n_i = n_arr[i]
-                k_i = alt_arr[i]
+        # Use multiprocessing for parallel computation
+        if ncpus == 1:
+            # Single-threaded execution for debugging or small datasets
+            for args in worker_args:
+                chunk_results = _compute_ff_likelihood_chunk(args)
+                log_likelihoods.update(chunk_results)
+                progress.advance(task)
+        else:
+            # Multi-threaded execution
+            with Pool(processes=ncpus) as pool:
+                chunk_results_list = []
                 
-                # Compute mixture probabilities for all genotypes
-                mu_values = (1 - FF) * maternal_alt_frac + FF * fetal_alt_frac[i, :]
+                # Submit all jobs
+                async_results = [pool.apply_async(_compute_ff_likelihood_chunk, (args,)) for args in worker_args]
                 
-                # Compute log probabilities for each genotype
-                log_probs = np.zeros(3)
-                for g in range(3):
-                    mu_g = mu_values[g]
-                    log_pmf = _log_binomial_pmf(k_i, n_i, mu_g)
-                    log_probs[g] = log_prior_G[i, g] + log_pmf
-                
-                # Use log-sum-exp to compute log-likelihood for this SNP
-                log_L_i = _log_sum_exp(log_probs)
-                total_log_lik += log_L_i
-            
-            log_likelihoods[FF] = total_log_lik
-            progress.advance(task)
+                # Collect results as they complete
+                for async_result in async_results:
+                    chunk_results = async_result.get()
+                    log_likelihoods.update(chunk_results)
+                    progress.advance(task)
     
     # Find the fetal fraction with maximum likelihood
     best_ff = max(log_likelihoods, key=log_likelihoods.get)
@@ -529,6 +619,12 @@ def LR_calculator(input_df: pd.DataFrame, fetal_fraction: float) -> float:
     help='Chromosomes to analyze (e.g., "1-22", "1,2,3", or "21"). Default: 1-22'
 )
 @click.option(
+    '--ncpus',
+    type=click.IntRange(1, cpu_count()),
+    default=cpu_count(),
+    help=f'Number of CPU cores to use for parallel processing (default: {cpu_count()})'
+)
+@click.option(
     '--verbose', '-v',
     is_flag=True,
     help='Enable verbose output'
@@ -540,6 +636,7 @@ def main(
     ff_max: float,
     ff_step: float,
     chromosomes: str,
+    ncpus: int,
     verbose: bool
 ) -> None:
     """
@@ -548,10 +645,13 @@ def main(
     This tool analyzes cell-free DNA sequencing data to estimate fetal fraction
     and calculate likelihood ratios for trisomy detection across chromosomes.
     
-    The input file should be a TSV.GZ file with columns:
-    chr, pos, af, cfDNA_ref_reads, cfDNA_alt_reads
-    
-    Results are saved as TSV files with fetal fraction estimates and likelihood ratios.
+         The input file should be a TSV.GZ file with columns:
+     chr, pos, af, cfDNA_ref_reads, cfDNA_alt_reads
+     
+     Results are saved as TSV files with fetal fraction estimates and likelihood ratios.
+     
+     Multi-threading is used by default to speed up fetal fraction estimation.
+     Use --ncpus to control the number of CPU cores used.
     """
     # Configure console output
     if verbose:
@@ -566,13 +666,14 @@ def main(
         
         # Display startup information
         console.print(Panel.fit(
-            f"[bold green]Fetal Fraction & Likelihood Ratio Calculator[/bold green]\n"
-            f"Input: {input_path}\n"
-            f"Output: {output_dir}\n"
-            f"Chromosomes: {', '.join(map(str, target_chromosomes))}\n"
-            f"FF Range: {ff_min:.3f} - {ff_max:.3f} (step: {ff_step:.3f})",
-            title="Configuration"
-        ))
+             f"[bold green]Fetal Fraction & Likelihood Ratio Calculator[/bold green]\n"
+             f"Input: {input_path}\n"
+             f"Output: {output_dir}\n"
+             f"Chromosomes: {', '.join(map(str, target_chromosomes))}\n"
+             f"FF Range: {ff_min:.3f} - {ff_max:.3f} (step: {ff_step:.3f})\n"
+             f"CPU Cores: {ncpus}",
+             title="Configuration"
+         ))
         
         # Generate output filename based on input
         input_filename = input_path.stem.replace('.tsv', '')
@@ -613,7 +714,8 @@ def main(
                     background_data,
                     f_min=ff_min,
                     f_max=ff_max,
-                    f_step=ff_step
+                    f_step=ff_step,
+                    ncpus=ncpus
                 )
                 
                 # Calculate likelihood ratio for target chromosome
@@ -780,4 +882,11 @@ def display_results_summary(results: Dict, target_chromosomes: list) -> None:
 
 
 if __name__ == "__main__":
+    # Set multiprocessing start method for compatibility
+    import multiprocessing as mp
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass  # Start method already set
+    
     main()
