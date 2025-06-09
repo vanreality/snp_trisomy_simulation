@@ -742,7 +742,7 @@ def run_simulation(args: Tuple) -> None:
         
         if not disomy_simulated_df.empty:
             disomy_output_path = Path(output_dir) / f"disomy_{depth}_{ff:.3f}_{repeat_idx}.tsv"
-            disomy_simulated_df.to_csv(disomy_output_path, sep='\t', index=False, header=True, compression='gzip')
+            disomy_simulated_df.to_csv(f'{disomy_output_path}.gz', sep='\t', index=False, header=True, compression='gzip')
         
         # Run trisomy simulation
         trisomy_simulated_df = run_single_trisomy_simulation_set(
@@ -751,7 +751,7 @@ def run_simulation(args: Tuple) -> None:
         
         if not trisomy_simulated_df.empty:
             trisomy_output_path = Path(output_dir) / f"trisomy_{depth}_{ff:.3f}_{repeat_idx}.tsv"
-            trisomy_simulated_df.to_csv(trisomy_output_path, sep='\t', index=False, header=True, compression='gzip')
+            trisomy_simulated_df.to_csv(f'{trisomy_output_path}.gz', sep='\t', index=False, header=True, compression='gzip')
             
     except Exception as e:
         console.print(f"[red]Error in simulation for depth={depth}, ff={ff:.3f}, repeat={repeat_idx}: {e}[/red]")
