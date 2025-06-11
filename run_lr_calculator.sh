@@ -7,7 +7,6 @@ root_dir="/lustre1/cqyi/syfan/snp_nipt/results/snp_trisomy_simulation"
 sim_dirs=(
     "simulated_sequencing_data_957"
     "simulated_sequencing_data_25092" 
-    "simulated_sequencing_data_2k"
     "simulated_sequencing_data_3k"
     "simulated_sequencing_data_all"
 )
@@ -21,7 +20,9 @@ for sim_dir in "${sim_dirs[@]}"; do
     
     # Loop through each label
     for label in "${labels[@]}"; do
-        # Submit SLURM job
-        sbatch run_lr_calculator.slurm "${input_dir}" "${label}"
+        for depth in $(seq 80 20 200); do
+            # Submit SLURM job
+            sbatch run_lr_calculator.slurm "${input_dir}" "${label}" "${depth}"
+        done
     done
 done
