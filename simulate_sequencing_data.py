@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Tuple, Dict, List, Optional, Union
 import logging
 from functools import partial
+import math
 
 import numpy as np
 import pandas as pd
@@ -63,6 +64,67 @@ class SNPSimulationError(Exception):
 class ValidationError(Exception):
     """Custom exception for input validation errors."""
     pass
+
+
+def determine_decimal_format(value: float) -> str:
+    """
+    Determine the appropriate decimal format string for a float value.
+    
+    Args:
+        value: The float value to analyze
+        
+    Returns:
+        Format string (e.g., '.2f', '.3f', '.4f')
+    """
+    if value == 0:
+        return '.1f'
+    
+    # Count decimal places needed based on the value
+    # For values like 0.81, we want 2 decimal places
+    # For values like 0.005, we want more precision
+    abs_value = abs(value)
+    
+    if abs_value >= 1:
+        return '.2f'
+    elif abs_value >= 0.1:
+        return '.2f'
+    elif abs_value >= 0.01:
+        return '.3f'
+    elif abs_value >= 0.001:
+        return '.4f'
+    else:
+        return '.5f'
+
+
+def determine_ff_format(min_ff: float, max_ff: float, num_ff: int) -> str:
+    """
+    Determine the appropriate decimal format for fetal fraction based on range and precision needed.
+    
+    Args:
+        min_ff: Minimum fetal fraction
+        max_ff: Maximum fetal fraction
+        num_ff: Number of fetal fraction points
+        
+    Returns:
+        Format string (e.g., '.3f', '.4f')
+    """
+    if num_ff <= 1:
+        step_size = max_ff - min_ff
+    else:
+        step_size = (max_ff - min_ff) / (num_ff - 1)
+    
+    if step_size == 0:
+        return determine_decimal_format(min_ff)
+    
+    # Determine decimal places needed based on step size
+    if step_size >= 0.1:
+        return '.2f'
+    elif step_size >= 0.01:
+        return '.3f'
+    elif step_size >= 0.001:
+        return '.4f'
+    else:
+        return '.5f'
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -727,9 +789,9 @@ def run_simulation(args: Tuple) -> None:
     
     Args:
         args: Tuple containing (depth, ff, repeat_idx, trisomy_chr, potential_df, 
-              model_accuracy, output_dir)
+              model_accuracy, output_dir, ff_fmt)
     """
-    depth, ff, repeat_idx, trisomy_chr, potential_df, model_accuracy, output_dir = args
+    depth, ff, repeat_idx, trisomy_chr, potential_df, model_accuracy, output_dir, ff_fmt = args
     
     try:
         # Create output directory if it doesn't exist
@@ -741,7 +803,7 @@ def run_simulation(args: Tuple) -> None:
         )
         
         if not disomy_simulated_df.empty:
-            disomy_output_path = Path(output_dir) / f"disomy_{depth}_{ff:.3f}_{repeat_idx}.tsv"
+            disomy_output_path = Path(output_dir) / f"disomy_{depth}_{ff:{ff_fmt}}_{repeat_idx}.tsv"
             disomy_simulated_df.to_csv(f'{disomy_output_path}.gz', sep='\t', index=False, header=True, compression='gzip')
         
         # Run trisomy simulation
@@ -750,11 +812,11 @@ def run_simulation(args: Tuple) -> None:
         )
         
         if not trisomy_simulated_df.empty:
-            trisomy_output_path = Path(output_dir) / f"trisomy_{depth}_{ff:.3f}_{repeat_idx}.tsv"
+            trisomy_output_path = Path(output_dir) / f"trisomy_{depth}_{ff:{ff_fmt}}_{repeat_idx}.tsv"
             trisomy_simulated_df.to_csv(f'{trisomy_output_path}.gz', sep='\t', index=False, header=True, compression='gzip')
             
     except Exception as e:
-        console.print(f"[red]Error in simulation for depth={depth}, ff={ff:.3f}, repeat={repeat_idx}: {e}[/red]")
+        console.print(f"[red]Error in simulation for depth={depth}, ff={ff:{ff_fmt}}, repeat={repeat_idx}: {e}[/red]")
 
 
 def load_snp_data(file_path: Path) -> pd.DataFrame:
@@ -962,6 +1024,10 @@ def main(
             min_ff, max_ff, num_ff, potential_snp_path
         )
         
+        # Determine formatting for display and filenames
+        model_accuracy_fmt = determine_decimal_format(model_accuracy)
+        ff_fmt = determine_ff_format(min_ff, max_ff, num_ff)
+        
         # Load and validate SNP data
         console.print("[blue]Loading SNP data...[/blue]")
         potential_df = load_snp_data(potential_snp_path)
@@ -976,10 +1042,10 @@ def main(
         params_table.add_column("Value", style="green")
         
         params_table.add_row("Repeats per combination", str(n_repeats))
-        params_table.add_row("Model accuracy", f"{model_accuracy:.3f}")
+        params_table.add_row("Model accuracy", f"{model_accuracy:{model_accuracy_fmt}}")
         params_table.add_row("Trisomy chromosome", trisomy_chr)
         params_table.add_row("Depth range", f"{min_depth}-{max_depth} ({num_depth} points)")
-        params_table.add_row("Fetal fraction range", f"{min_ff:.3f}-{max_ff:.3f} ({num_ff} points)")
+        params_table.add_row("Fetal fraction range", f"{min_ff:{ff_fmt}}-{max_ff:{ff_fmt}} ({num_ff} points)")
         params_table.add_row("Total combinations", str(len(depth_range) * len(ff_range) * n_repeats))
         params_table.add_row("Output directory", str(output_dir))
         
@@ -991,7 +1057,7 @@ def main(
         
         # Generate all parameter combinations
         param_combinations = [
-            (depth, ff, repeat_idx, trisomy_chr, potential_df, model_accuracy, str(output_dir))
+            (depth, ff, repeat_idx, trisomy_chr, potential_df, model_accuracy, str(output_dir), ff_fmt)
             for depth in depth_range
             for ff in ff_range
             for repeat_idx in range(n_repeats)
