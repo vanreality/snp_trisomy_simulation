@@ -85,15 +85,15 @@ def determine_decimal_format(value: float) -> str:
     abs_value = abs(value)
     
     if abs_value >= 1:
-        return '.2f'
+        return '.1f'
     elif abs_value >= 0.1:
-        return '.2f'
+        return '.1f'
     elif abs_value >= 0.01:
-        return '.3f'
+        return '.2f'
     elif abs_value >= 0.001:
-        return '.4f'
+        return '.3f'
     else:
-        return '.5f'
+        return '.4f'
 
 
 def determine_ff_format(min_ff: float, max_ff: float, num_ff: int) -> str:
@@ -118,13 +118,13 @@ def determine_ff_format(min_ff: float, max_ff: float, num_ff: int) -> str:
     
     # Determine decimal places needed based on step size
     if step_size >= 0.1:
-        return '.2f'
+        return '.1f'
     elif step_size >= 0.01:
-        return '.3f'
+        return '.2f'
     elif step_size >= 0.001:
-        return '.4f'
+        return '.3f'
     else:
-        return '.5f'
+        return '.4f'
 
 
 def setup_logging(verbose: bool = False) -> None:
