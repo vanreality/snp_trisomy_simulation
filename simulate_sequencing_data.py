@@ -623,6 +623,14 @@ def run_single_disomy_simulation_set(
                 model_accuracy, maternal_ref_reads, maternal_alt_reads, 
                 fetal_ref_reads, fetal_alt_reads, local_rng
             )
+
+            # Calculate maternal reads from model
+            maternal_ref_reads_from_model = cfDNA_ref_reads - (filtered_fetal_ref + misclassified_maternal_ref)
+            maternal_alt_reads_from_model = cfDNA_alt_reads - (filtered_fetal_alt + misclassified_maternal_alt)
+
+            # Calculate fetal reads from model
+            fetal_ref_reads_from_model = cfDNA_ref_reads - maternal_ref_reads_from_model
+            fetal_alt_reads_from_model = cfDNA_alt_reads - maternal_alt_reads_from_model
             
             records.append({
                 'chr': row['chr'],
@@ -640,10 +648,14 @@ def run_single_disomy_simulation_set(
                 'fetal_alt_reads': fetal_alt_reads,
                 'cfDNA_ref_reads': cfDNA_ref_reads,
                 'cfDNA_alt_reads': cfDNA_alt_reads,
-                'filtered_fetal_ref': filtered_fetal_ref,
-                'filtered_fetal_alt': filtered_fetal_alt,
-                'misclassified_maternal_ref': misclassified_maternal_ref,
-                'misclassified_maternal_alt': misclassified_maternal_alt,
+                'filtered_fetal_ref_reads': filtered_fetal_ref,
+                'filtered_fetal_alt_reads': filtered_fetal_alt,
+                'misclassified_maternal_ref_reads': misclassified_maternal_ref,
+                'misclassified_maternal_alt_reads': misclassified_maternal_alt,
+                'maternal_ref_reads_from_model': maternal_ref_reads_from_model,
+                'maternal_alt_reads_from_model': maternal_alt_reads_from_model,
+                'fetal_ref_reads_from_model': fetal_ref_reads_from_model,
+                'fetal_alt_reads_from_model': fetal_alt_reads_from_model,
             })
             
             # Update progress if callback provided
@@ -744,6 +756,14 @@ def run_single_trisomy_simulation_set(
                 model_accuracy, maternal_ref_reads, maternal_alt_reads, 
                 fetal_ref_reads, fetal_alt_reads, local_rng
             )
+
+            # Calculate maternal reads from model
+            maternal_ref_reads_from_model = cfDNA_ref_reads - (filtered_fetal_ref + misclassified_maternal_ref)
+            maternal_alt_reads_from_model = cfDNA_alt_reads - (filtered_fetal_alt + misclassified_maternal_alt)
+
+            # Calculate fetal reads from model
+            fetal_ref_reads_from_model = cfDNA_ref_reads - maternal_ref_reads_from_model
+            fetal_alt_reads_from_model = cfDNA_alt_reads - maternal_alt_reads_from_model
             
             records.append({
                 'chr': row['chr'],
@@ -761,11 +781,15 @@ def run_single_trisomy_simulation_set(
                 'fetal_alt_reads': fetal_alt_reads,
                 'cfDNA_ref_reads': cfDNA_ref_reads,
                 'cfDNA_alt_reads': cfDNA_alt_reads,
-                'filtered_fetal_ref': filtered_fetal_ref,
-                'filtered_fetal_alt': filtered_fetal_alt,
-                'misclassified_maternal_ref': misclassified_maternal_ref,
-                'misclassified_maternal_alt': misclassified_maternal_alt,
+                'filtered_fetal_ref_reads': filtered_fetal_ref,
+                'filtered_fetal_alt_reads': filtered_fetal_alt,
+                'misclassified_maternal_ref_reads': misclassified_maternal_ref,
+                'misclassified_maternal_alt_reads': misclassified_maternal_alt,
                 'is_trisomy_chr': is_trisomy,
+                'maternal_ref_reads_from_model': maternal_ref_reads_from_model,
+                'maternal_alt_reads_from_model': maternal_alt_reads_from_model,
+                'fetal_ref_reads_from_model': fetal_ref_reads_from_model,
+                'fetal_alt_reads_from_model': fetal_alt_reads_from_model,
             })
             
             # Update progress if callback provided
