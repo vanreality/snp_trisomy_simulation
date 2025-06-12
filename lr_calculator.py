@@ -703,7 +703,7 @@ def estimate_fetal_fraction_with_maternal_reads(
     console.print(f"[cyan]Using {ncpus} CPU cores for grid search from {f_min} to {f_max}[/cyan]")
 
     # Shared data tuple
-    shared = (p_arr, n_arr, alt_arr, log_prior_G, fetal_alt_frac)
+    shared = (p_arr, n_arr, alt_arr, log_prior_G, maternal_alt_frac, fetal_alt_frac)
     # Split f_values for parallel chunks
     chunks = np.array_split(f_values, ncpus)
 
