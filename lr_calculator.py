@@ -122,7 +122,9 @@ def estimate_fetal_fraction(
     f_min: float = 0.001, 
     f_max: float = 0.5, 
     f_step: float = 0.001,
-    ncpus: int = cpu_count()
+    ncpus: int = cpu_count(),
+    ref_col: str = 'cfDNA_ref_reads',
+    alt_col: str = 'cfDNA_alt_reads'
 ) -> Tuple[float, Dict[float, float]]:
     """
     Estimate fetal fraction (FF) from maternal cfDNA SNP read counts using maximum likelihood estimation.
@@ -146,6 +148,8 @@ def estimate_fetal_fraction(
          f_max (float, optional): Maximum fetal fraction to search. Defaults to 0.5.
          f_step (float, optional): Step size for grid search. Defaults to 0.001.
          ncpus (int, optional): Number of CPU cores to use. Defaults to cpu_count().
+         ref_col (str, optional): Column name for reference reads. Defaults to 'cfDNA_ref_reads'.
+         alt_col (str, optional): Column name for alternative reads. Defaults to 'cfDNA_alt_reads'.
     
     Returns:
         Tuple[float, Dict[float, float]]: A tuple containing:
@@ -157,7 +161,7 @@ def estimate_fetal_fraction(
         ValueError: If search parameters are invalid (f_min >= f_max, negative values, etc.)
     """
     # Input validation
-    required_columns = {'chr', 'pos', 'af', 'cfDNA_ref_reads', 'cfDNA_alt_reads'}
+    required_columns = {'chr', 'pos', 'af', ref_col, alt_col}
     if not required_columns.issubset(background_chr_df.columns):
         missing_cols = required_columns - set(background_chr_df.columns)
         raise ValueError(f"Missing required columns: {missing_cols}")
@@ -211,13 +215,13 @@ def estimate_fetal_fraction(
         df_clean = df_clean[~invalid_af]
     
     # Validate read counts
-    invalid_reads = (df_clean['cfDNA_ref_reads'] < 0) | (df_clean['cfDNA_alt_reads'] < 0)
+    invalid_reads = (df_clean[ref_col] < 0) | (df_clean[alt_col] < 0)
     if invalid_reads.any():
         console.print(f"[yellow]Warning: Removing {invalid_reads.sum()} SNPs with negative read counts[/yellow]")
         df_clean = df_clean[~invalid_reads]
     
     # Filter out SNPs with zero coverage
-    df_clean['total_reads'] = df_clean['cfDNA_ref_reads'] + df_clean['cfDNA_alt_reads']
+    df_clean['total_reads'] = df_clean[ref_col] + df_clean[alt_col]
     zero_coverage = df_clean['total_reads'] == 0
     if zero_coverage.any():
         console.print(f"[yellow]Warning: Removing {zero_coverage.sum()} SNPs with zero coverage[/yellow]")
@@ -228,8 +232,8 @@ def estimate_fetal_fraction(
     
     # Convert to numpy arrays for performance
     p_arr = df_clean['af'].to_numpy(dtype=np.float64)
-    ref_arr = df_clean['cfDNA_ref_reads'].to_numpy(dtype=np.int32)
-    alt_arr = df_clean['cfDNA_alt_reads'].to_numpy(dtype=np.int32)
+    ref_arr = df_clean[ref_col].to_numpy(dtype=np.int32)
+    alt_arr = df_clean[alt_col].to_numpy(dtype=np.int32)
     n_arr = ref_arr + alt_arr
     
     num_snps = len(p_arr)
@@ -310,8 +314,13 @@ def estimate_fetal_fraction(
     
     return best_ff, log_likelihoods
 
-
-def LR_calculator(input_df: pd.DataFrame, fetal_fraction: float) -> float:
+ 
+def LR_calculator(
+    input_df: pd.DataFrame, 
+    fetal_fraction: float,
+    ref_col: str = 'cfDNA_ref_reads',
+    alt_col: str = 'cfDNA_alt_reads'
+) -> float:
     """
     Calculate the likelihood ratio (LR) of trisomy vs. disomy for a target chromosome.
     
@@ -323,12 +332,14 @@ def LR_calculator(input_df: pd.DataFrame, fetal_fraction: float) -> float:
     
     Args:
         input_df (pd.DataFrame): DataFrame with target chromosome SNP data containing:
-            - 'chr': chromosome identifier (string or int)
-            - 'pos': genomic position (int)
-            - 'af': population allele frequency (float in [0,1])
-            - 'cfDNA_ref_reads': number of reference allele reads (int >= 0)
-            - 'cfDNA_alt_reads': number of alternative allele reads (int >= 0)
+             - 'chr': chromosome identifier (string or int)
+             - 'pos': genomic position (int)
+             - 'af': population allele frequency (float in [0,1])
+             - ref_col: number of reference allele reads (int >= 0)
+             - alt_col: number of alternative allele reads (int >= 0)
         fetal_fraction (float): Estimated fetal fraction in maternal plasma (0 < ff < 1)
+        ref_col (str, optional): Column name for reference reads. Defaults to 'cfDNA_ref_reads'.
+        alt_col (str, optional): Column name for alternative reads. Defaults to 'cfDNA_alt_reads'.
     
     Returns:
         float: Likelihood ratio LR = L_trisomy / L_disomy. 
@@ -340,7 +351,7 @@ def LR_calculator(input_df: pd.DataFrame, fetal_fraction: float) -> float:
         ValueError: If no valid SNPs are found
     """
     # Input validation
-    required_cols = {'chr', 'pos', 'af', 'cfDNA_ref_reads', 'cfDNA_alt_reads'}
+    required_cols = {'chr', 'pos', 'af', ref_col, alt_col}
     if not required_cols.issubset(input_df.columns):
         missing = required_cols - set(input_df.columns)
         raise ValueError(f"Input DataFrame is missing required columns: {missing}")
@@ -357,8 +368,8 @@ def LR_calculator(input_df: pd.DataFrame, fetal_fraction: float) -> float:
     # Remove SNPs with invalid data
     invalid_mask = (
         (df_clean['af'] < 0) | (df_clean['af'] > 1) |
-        (df_clean['cfDNA_ref_reads'] < 0) | (df_clean['cfDNA_alt_reads'] < 0) |
-        ((df_clean['cfDNA_ref_reads'] + df_clean['cfDNA_alt_reads']) == 0)
+        (df_clean[ref_col] < 0) | (df_clean[alt_col] < 0) |
+        ((df_clean[ref_col] + df_clean[alt_col]) == 0)
     )
     
     if invalid_mask.any():
@@ -498,8 +509,8 @@ def LR_calculator(input_df: pd.DataFrame, fetal_fraction: float) -> float:
         
         for idx, snp in df_clean.iterrows():
             # Extract observed data
-            ref_count = int(snp['cfDNA_ref_reads'])
-            alt_count = int(snp['cfDNA_alt_reads'])
+            ref_count = int(snp[ref_col])
+            alt_count = int(snp[alt_col])
             depth = ref_count + alt_count
             af = float(snp['af'])
             
@@ -582,6 +593,14 @@ def LR_calculator(input_df: pd.DataFrame, fetal_fraction: float) -> float:
         return math.exp(delta_logL)
 
 
+def estimate_fetal_fraction_with_maternal_reads():
+    pass
+
+
+def LR_calculator_with_maternal_reads():
+    pass
+
+
 @click.command()
 @click.option(
     '--input-path', '-i',
@@ -619,6 +638,42 @@ def LR_calculator(input_df: pd.DataFrame, fetal_fraction: float) -> float:
     help='Chromosomes to analyze (e.g., "1-22", "1,2,3", or "21"). Default: 1-22'
 )
 @click.option(
+    '--mode',
+    type=click.Choice(['cfDNA', 'cfDNA+WBC', 'cfDNA+model'], case_sensitive=False),
+    default='cfDNA',
+    help='Analysis mode: cfDNA (standard), cfDNA+WBC (with maternal WBC), cfDNA+model (with modeled maternal reads)'
+)
+@click.option(
+    '--cfdna-ref-col',
+    default='cfDNA_ref_reads',
+    help='Column name for cfDNA reference reads (default: cfDNA_ref_reads)'
+)
+@click.option(
+    '--cfdna-alt-col',
+    default='cfDNA_alt_reads',
+    help='Column name for cfDNA alternative reads (default: cfDNA_alt_reads)'
+)
+@click.option(
+    '--wbc-ref-col',
+    default='maternal_ref_reads',
+    help='Column name for maternal WBC reference reads (default: maternal_ref_reads)'
+)
+@click.option(
+    '--wbc-alt-col',
+    default='maternal_alt_reads',
+    help='Column name for maternal WBC alternative reads (default: maternal_alt_reads)'
+)
+@click.option(
+    '--model-ref-col',
+    default='maternal_ref_reads_from_model',
+    help='Column name for modeled maternal reference reads (default: maternal_ref_reads_from_model)'
+)
+@click.option(
+    '--model-alt-col',
+    default='maternal_alt_reads_from_model',
+    help='Column name for modeled maternal alternative reads (default: maternal_alt_reads_from_model)'
+)
+@click.option(
     '--ncpus',
     type=click.IntRange(1, cpu_count()),
     default=cpu_count(),
@@ -636,6 +691,13 @@ def main(
     ff_max: float,
     ff_step: float,
     chromosomes: str,
+    mode: str,
+    cfdna_ref_col: str,
+    cfdna_alt_col: str,
+    wbc_ref_col: str,
+    wbc_alt_col: str,
+    model_ref_col: str,
+    model_alt_col: str,
     ncpus: int,
     verbose: bool
 ) -> None:
@@ -645,13 +707,18 @@ def main(
     This tool analyzes cell-free DNA sequencing data to estimate fetal fraction
     and calculate likelihood ratios for trisomy detection across chromosomes.
     
-         The input file should be a TSV.GZ file with columns:
-     chr, pos, af, cfDNA_ref_reads, cfDNA_alt_reads
+    The input file should be a TSV.GZ file with columns:
+    chr, pos, af, and read count columns (names configurable via CLI options)
      
-     Results are saved as TSV files with fetal fraction estimates and likelihood ratios.
-     
-     Multi-threading is used by default to speed up fetal fraction estimation.
-     Use --ncpus to control the number of CPU cores used.
+    Supports three analysis modes:
+    - cfDNA: Standard cell-free DNA analysis
+    - cfDNA+WBC: Analysis with maternal white blood cell data
+    - cfDNA+model: Analysis with modeled maternal reads
+    
+    Results are saved as TSV files with fetal fraction estimates and likelihood ratios.
+    
+    Multi-threading is used by default to speed up fetal fraction estimation.
+    Use --ncpus to control the number of CPU cores used.
     """
     # Configure console output
     if verbose:
@@ -664,16 +731,27 @@ def main(
         # Create output directory
         output_dir.mkdir(parents=True, exist_ok=True)
         
+        # Determine which columns to display based on mode
+        mode_info = f"Mode: {mode}"
+        if mode == 'cfDNA':
+            column_info = f"cfDNA columns: {cfdna_ref_col}, {cfdna_alt_col}"
+        elif mode == 'cfDNA+WBC':
+            column_info = f"cfDNA columns: {cfdna_ref_col}, {cfdna_alt_col}\nWBC columns: {wbc_ref_col}, {wbc_alt_col}"
+        elif mode == 'cfDNA+model':
+            column_info = f"cfDNA columns: {cfdna_ref_col}, {cfdna_alt_col}\nModel columns: {model_ref_col}, {model_alt_col}"
+        
         # Display startup information
         console.print(Panel.fit(
-             f"[bold green]Fetal Fraction & Likelihood Ratio Calculator[/bold green]\n"
-             f"Input: {input_path}\n"
-             f"Output: {output_dir}\n"
-             f"Chromosomes: {', '.join(map(str, target_chromosomes))}\n"
-             f"FF Range: {ff_min:.3f} - {ff_max:.3f} (step: {ff_step:.3f})\n"
-             f"CPU Cores: {ncpus}",
-             title="Configuration"
-         ))
+            f"[bold green]Fetal Fraction & Likelihood Ratio Calculator[/bold green]\n"
+            f"Input: {input_path}\n"
+            f"Output: {output_dir}\n"
+            f"{mode_info}\n"
+            f"{column_info}\n"
+            f"Chromosomes: {', '.join(map(str, target_chromosomes))}\n"
+            f"FF Range: {ff_min:.3f} - {ff_max:.3f} (step: {ff_step:.3f})\n"
+            f"CPU Cores: {ncpus}",
+            title="Configuration"
+        ))
         
         # Generate output filename based on input
         input_filename = input_path.stem.replace('.tsv', '')
@@ -681,7 +759,16 @@ def main(
         
         # Load and validate input data
         console.print("[cyan]Loading input data...[/cyan]")
-        df = load_and_validate_data(input_path)
+        df = load_and_validate_data(
+            input_path,
+            mode=mode,
+            cfdna_ref_col=cfdna_ref_col,
+            cfdna_alt_col=cfdna_alt_col,
+            wbc_ref_col=wbc_ref_col,
+            wbc_alt_col=wbc_alt_col,
+            model_ref_col=model_ref_col,
+            model_alt_col=model_alt_col
+        )
         
         console.print(f"[green]✓ Loaded {len(df)} SNPs from {df['chr'].nunique()} chromosomes[/green]")
         
@@ -715,7 +802,9 @@ def main(
                     f_min=ff_min,
                     f_max=ff_max,
                     f_step=ff_step,
-                    ncpus=ncpus
+                    ncpus=ncpus,
+                    ref_col=cfdna_ref_col,
+                    alt_col=cfdna_alt_col
                 )
                 
                 # Calculate likelihood ratio for target chromosome
@@ -782,18 +871,37 @@ def parse_chromosome_list(chr_spec: str) -> list:
         raise ValueError(f"Invalid chromosome specification: {chr_spec}")
 
 
-def load_and_validate_data(input_path: Path) -> pd.DataFrame:
+def load_and_validate_data(
+    input_path: Path, 
+    mode: str = 'cfDNA',
+    cfdna_ref_col: str = 'cfDNA_ref_reads',
+    cfdna_alt_col: str = 'cfDNA_alt_reads',
+    wbc_ref_col: str = 'maternal_ref_reads',
+    wbc_alt_col: str = 'maternal_alt_reads',
+    model_ref_col: str = 'maternal_ref_reads_from_model',
+    model_alt_col: str = 'maternal_alt_reads_from_model'
+) -> pd.DataFrame:
     """
     Load and validate input SNP data from TSV.GZ file.
     
+    This function validates the presence of required columns based on the analysis mode
+    and performs data type validation and cleaning.
+    
     Args:
-        input_path: Path to input file
+        input_path (Path): Path to input file
+        mode (str): Analysis mode ('cfDNA', 'cfDNA+WBC', or 'cfDNA+model')
+        cfdna_ref_col (str): Column name for cfDNA reference reads
+        cfdna_alt_col (str): Column name for cfDNA alternative reads
+        wbc_ref_col (str): Column name for maternal WBC reference reads
+        wbc_alt_col (str): Column name for maternal WBC alternative reads
+        model_ref_col (str): Column name for modeled maternal reference reads
+        model_alt_col (str): Column name for modeled maternal alternative reads
     
     Returns:
-        Validated pandas DataFrame
+        pd.DataFrame: Validated pandas DataFrame with proper data types
     
     Raises:
-        ValueError: If data validation fails
+        ValueError: If data validation fails or required columns are missing
         FileNotFoundError: If input file doesn't exist
     """
     if not input_path.exists():
@@ -805,28 +913,51 @@ def load_and_validate_data(input_path: Path) -> pd.DataFrame:
     except Exception as e:
         raise ValueError(f"Failed to load input file: {str(e)}")
     
-    # Validate required columns
-    required_columns = {'chr', 'pos', 'af', 'cfDNA_ref_reads', 'cfDNA_alt_reads'}
+    # Determine required columns based on mode
+    base_columns = {'chr', 'pos', 'af'}
+    required_columns = base_columns.copy()
+    read_columns = []
+    
+    if mode == 'cfDNA':
+        required_columns.update({cfdna_ref_col, cfdna_alt_col})
+        read_columns = [cfdna_ref_col, cfdna_alt_col]
+        console.print(f"[cyan]Validating cfDNA mode with columns: {cfdna_ref_col}, {cfdna_alt_col}[/cyan]")
+    elif mode == 'cfDNA+WBC':
+        required_columns.update({cfdna_ref_col, cfdna_alt_col, wbc_ref_col, wbc_alt_col})
+        read_columns = [cfdna_ref_col, cfdna_alt_col, wbc_ref_col, wbc_alt_col]
+        console.print(f"[cyan]Validating cfDNA+WBC mode with columns: {', '.join(read_columns)}[/cyan]")
+    elif mode == 'cfDNA+model':
+        required_columns.update({cfdna_ref_col, cfdna_alt_col, model_ref_col, model_alt_col})
+        read_columns = [cfdna_ref_col, cfdna_alt_col, model_ref_col, model_alt_col]
+        console.print(f"[cyan]Validating cfDNA+model mode with columns: {', '.join(read_columns)}[/cyan]")
+    else:
+        raise ValueError(f"Invalid mode: {mode}. Must be one of: cfDNA, cfDNA+WBC, cfDNA+model")
+    
+    # Check for required columns
     if not required_columns.issubset(df.columns):
         missing = required_columns - set(df.columns)
-        raise ValueError(f"Missing required columns: {missing}")
+        raise ValueError(f"Missing required columns for mode '{mode}': {missing}")
     
     # Basic data validation
     if len(df) == 0:
         raise ValueError("Input file is empty")
     
-    # Ensure proper data types
+    # Ensure proper data types for base columns
     df['pos'] = pd.to_numeric(df['pos'], errors='coerce')
     df['af'] = pd.to_numeric(df['af'], errors='coerce')
-    df['cfDNA_ref_reads'] = pd.to_numeric(df['cfDNA_ref_reads'], errors='coerce', downcast='integer')
-    df['cfDNA_alt_reads'] = pd.to_numeric(df['cfDNA_alt_reads'], errors='coerce', downcast='integer')
     
-    # Remove rows with invalid data
+    # Ensure proper data types for read count columns
+    for col in read_columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce', downcast='integer')
+    
+    # Build invalid mask for base columns
     invalid_mask = (
-        df['af'].isna() | df['cfDNA_ref_reads'].isna() | df['cfDNA_alt_reads'].isna() |
-        (df['af'] < 0) | (df['af'] > 1) |
-        (df['cfDNA_ref_reads'] < 0) | (df['cfDNA_alt_reads'] < 0)
+        df['af'].isna() | (df['af'] < 0) | (df['af'] > 1)
     )
+    
+    # Add read count validation to invalid mask
+    for col in read_columns:
+        invalid_mask |= (df[col].isna() | (df[col] < 0))
     
     if invalid_mask.any():
         console.print(f"[yellow]Warning: Removing {invalid_mask.sum()} rows with invalid data[/yellow]")
