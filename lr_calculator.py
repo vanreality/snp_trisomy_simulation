@@ -749,168 +749,214 @@ def LR_calculator_with_maternal_reads(
     maternal_alt_col: str = 'maternal_alt_reads'
 ) -> float:
     """
-    Calculate the likelihood ratio (LR) of trisomy vs. disomy for a target chromosome.
+    Calculate the likelihood ratio (LR) of trisomy vs. disomy for a target chromosome,
+    incorporating maternal WBC genotype information.
 
-    This function:
-      1. Uses maternal WBC read counts to call maternal genotype per SNP
-      2. Considers all possible paternal genotype combinations under HWE
-      3. Models fetal genotype distributions under disomy and trisomy
-      4. Accounts for mixture due to fetal fraction
-      5. Computes LR = L_trisomy / L_disomy
+    This function first determines the most likely maternal genotype at each SNP using
+    read counts from maternal WBCs. It then calculates the likelihood of observed
+    cfDNA reads under both disomy and trisomy hypotheses, conditioned on the inferred
+    maternal genotype and marginalizing over paternal genotypes based on population
+    allele frequencies.
 
     Args:
-        input_df (pd.DataFrame): SNP data with columns:
-             - 'chr', 'pos', 'af'
-             - cfDNA read counts (ref_col, alt_col)
-             - maternal WBC read counts (maternal_ref_col, maternal_alt_col)
-        fetal_fraction (float): Fetal fraction in cfDNA (0 < ff < 1)
-        ref_col (str): Column name for cfDNA reference reads
-        alt_col (str): Column name for cfDNA alternative reads
-        maternal_ref_col (str): Column for maternal WBC reference reads
-        maternal_alt_col (str): Column for maternal WBC alternative reads
+        input_df (pd.DataFrame): DataFrame with SNP data including cfDNA and maternal reads.
+            Required columns: 'chr', 'pos', 'af', cfDNA reads, and maternal WBC reads.
+        fetal_fraction (float): Estimated fetal fraction in maternal plasma (0 < ff < 1).
+        ref_col (str, optional): Column name for cfDNA reference reads.
+        alt_col (str, optional): Column name for cfDNA alternative reads.
+        maternal_ref_col (str, optional): Column for maternal WBC reference reads.
+        maternal_alt_col (str, optional): Column for maternal WBC alternative reads.
 
     Returns:
-        float: Likelihood ratio LR = L_trisomy / L_disomy
+        float: The likelihood ratio LR = L_trisomy / L_disomy. Returns np.inf if
+               the disomy likelihood is zero, and 0.0 if the trisomy likelihood is zero.
+
+    Raises:
+        ValueError: If input data is invalid, fetal fraction is out of range,
+                    or required columns are missing.
     """
-    # Validate input columns
-    required = {'chr', 'pos', 'af', ref_col, alt_col, maternal_ref_col, maternal_alt_col}
-    if not required.issubset(input_df.columns):
-        missing = required - set(input_df.columns)
-        raise ValueError(f"Missing columns: {missing}")
+    # Input validation
+    required_cols = {'chr', 'pos', 'af', ref_col, alt_col, maternal_ref_col, maternal_alt_col}
+    if not required_cols.issubset(input_df.columns):
+        missing = required_cols - set(input_df.columns)
+        raise ValueError(f"Input DataFrame is missing required columns: {missing}")
+
     if not (0.0 < fetal_fraction < 1.0):
-        raise ValueError(f"fetal_fraction must be between 0 and 1: {fetal_fraction}")
+        raise ValueError(f"fetal_fraction must be between 0 and 1 (exclusive): {fetal_fraction}")
+
     if input_df.empty:
-        raise ValueError("Input DataFrame is empty")
+        raise ValueError("No SNPs found in input DataFrame")
 
-    # Clean data: remove invalid SNPs
-    df = input_df.copy()
-    mask_invalid = (
-        (df['af'] < 0) | (df['af'] > 1) |
-        (df[ref_col] < 0) | (df[alt_col] < 0) |
-        ((df[ref_col] + df[alt_col]) == 0)
+    # Data cleaning and validation
+    df_clean = input_df.copy()
+    invalid_mask = (
+        (df_clean['af'] < 0) | (df_clean['af'] > 1) |
+        (df_clean[ref_col] < 0) | (df_clean[alt_col] < 0) |
+        ((df_clean[ref_col] + df_clean[alt_col]) == 0) |
+        (df_clean[maternal_ref_col] < 0) | (df_clean[maternal_alt_col] < 0)
     )
-    if mask_invalid.any():
-        console.print(f"[yellow]Dropping {mask_invalid.sum()} invalid SNPs[/yellow]")
-        df = df[~mask_invalid]
-    if df.empty:
-        raise ValueError("No valid SNPs after filtering")
 
-    # Define genotype labels
-    genotype_labels = ['0/0', '0/1', '1/1']
+    if invalid_mask.any():
+        console.print(f"[yellow]Warning: Removing {invalid_mask.sum()} invalid SNPs[/yellow]")
+        df_clean = df_clean[~invalid_mask]
 
-    # Helper: log binomial PMF
-    def log_binom_pmf(k: int, n: int, p: float) -> float:
-        if p < 0 or p > 1 or k < 0 or k > n:
-            return float('-inf')
-        if p in (0.0, 1.0):
-            return 0.0 if (k == n * p) else float('-inf')
-        coeff = math.lgamma(n+1) - math.lgamma(k+1) - math.lgamma(n-k+1)
-        return coeff + k*math.log(p) + (n-k)*math.log(1-p)
+    if df_clean.empty:
+        raise ValueError("No valid SNPs remaining after filtering")
 
-    # Helper: stable log-sum-exp
-    def logsumexp(vals: np.ndarray) -> float:
-        m = np.max(vals)
-        if m == float('-inf'):
-            return m
-        return m + math.log(np.sum(np.exp(vals - m)))
-
-    # Helper: HWE genotype priors for paternal side
-    def hwe_priors(af: float) -> Dict[str, float]:
+    # Helper functions for genotype modeling (copied from LR_calculator for encapsulation)
+    def genotype_priors(af: float) -> Dict[str, float]:
+        """Compute Hardy-Weinberg genotype priors for a given allele frequency."""
         return {
-            '0/0': (1-af)**2,
-            '0/1': 2*af*(1-af),
-            '1/1': af**2
+            '0/0': (1.0 - af) ** 2,
+            '0/1': 2.0 * af * (1.0 - af),
+            '1/1': af ** 2
         }
 
-    # Helper: fetal genotype distribution under disomy
-    def fetus_disomy(gm: str, gp: str) -> Dict[str, float]:
-        # maternal allele probs
-        def allele_probs(gt: str) -> Dict[int,float]:
-            a1,a2 = map(int, gt.split('/'))
-            return {0: [a1,a2].count(0)/2, 1: [a1,a2].count(1)/2}
-        pm = allele_probs(gm); pp = allele_probs(gp)
-        out = {'0/0':0.0,'0/1':0.0,'1/1':0.0}
-        for am, pmv in pm.items():
-            for ap, ppv in pp.items():
-                gt = f"{min(am,ap)}/{max(am,ap)}"
-                out[gt] += pmv*ppv
-        return out
+    def get_fetal_prob_disomy(gm: str, gp: str) -> Dict[str, float]:
+        """Compute fetal genotype probabilities under disomy given parental genotypes."""
+        def allele_probs_from_genotype(gt: str) -> Dict[int, float]:
+            a1, a2 = map(int, gt.split('/'))
+            counts = {0: 0, 1: 0}
+            counts[a1] += 1
+            counts[a2] += 1
+            return {0: counts[0] / 2.0, 1: counts[1] / 2.0}
+        
+        pm = allele_probs_from_genotype(gm)
+        pp = allele_probs_from_genotype(gp)
+        fetal_probs = {'0/0': 0.0, '0/1': 0.0, '1/1': 0.0}
+        
+        for mat_allele, p_mat in pm.items():
+            for pat_allele, p_pat in pp.items():
+                prob_combo = p_mat * p_pat
+                fetal_genotype = f"{min(mat_allele, pat_allele)}/{max(mat_allele, pat_allele)}"
+                fetal_probs[fetal_genotype] += prob_combo
+        return fetal_probs
 
-    # Helper: ALT dosage distribution under trisomy
-    def fetus_trisomy(gm: str, gp: str) -> Dict[int, float]:
-        def allele_prob(gt: str) -> Dict[int,float]:
-            a1,a2 = map(int, gt.split('/'))
-            return {0: [a1,a2].count(0)/2, 1: [a1,a2].count(1)/2}
-        pm = allele_prob(gm); pp = allele_prob(gp)
-        # maternal 2 draws
-        p_alt = pm[1]
-        mat = {0:(1-p_alt)**2, 1:2*p_alt*(1-p_alt), 2:p_alt**2}
-        pat = pp[1]
-        out = {0:0,1:0,2:0,3:0}
-        for m_d, pmv in mat.items():
-            out[m_d]   += pmv*(1-pat)
-            out[m_d+1] += pmv*pat
-        return out
+    def get_fetal_prob_trisomy(gm: str, gp: str) -> Dict[int, float]:
+        """Compute fetal ALT-allele dosage probabilities under trisomy."""
+        def allele_probs(gt: str) -> Dict[int, float]:
+            a1, a2 = map(int, gt.split('/'))
+            counts = {0: 0, 1: 0}
+            counts[a1] += 1
+            counts[a2] += 1
+            return {0: counts[0] / 2.0, 1: counts[1] / 2.0}
 
-    # Call maternal genotype per SNP
-    m_ref = df[maternal_ref_col].to_numpy(dtype=int)
-    m_alt = df[maternal_alt_col].to_numpy(dtype=int)
+        pm = allele_probs(gm)
+        pp = allele_probs(gp)
+        
+        p_mat_alt = pm[1]
+        maternal_dosage_probs = {
+            0: (1 - p_mat_alt) ** 2,
+            1: 2 * p_mat_alt * (1 - p_mat_alt),
+            2: p_mat_alt ** 2
+        }
+        
+        paternal_alt_prob = pp[1]
+        fetal_dosage_probs = {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0}
+        for k_m, p_m in maternal_dosage_probs.items():
+            for k_p in [0, 1]:
+                d = k_m + k_p
+                prob = p_m * (paternal_alt_prob if k_p == 1 else (1 - paternal_alt_prob))
+                fetal_dosage_probs[d] += prob
+        return fetal_dosage_probs
+    
+    # Infer maternal genotype from WBC reads
+    m_ref = df_clean[maternal_ref_col].to_numpy(dtype=np.int32)
+    m_alt = df_clean[maternal_alt_col].to_numpy(dtype=np.int32)
     m_n = m_ref + m_alt
-    # possible alt fractions for maternal genotypes
-    alt_fracs = [0.0, 0.5, 1.0]
-    # compute log-likelihoods for maternal genotypes
-    maternal_calls = []
-    for i,(a,n) in enumerate(zip(m_alt,m_n)):
-        ll = [log_binom_pmf(a, n, f) for f in alt_fracs]
-        maternal_calls.append(genotype_labels[int(np.argmax(ll))])
+    
+    maternal_alt_frac_options = np.array([0.0, 0.5, 1.0], dtype=np.float64)
+    maternal_loglik = np.zeros((len(df_clean), 3), dtype=np.float64)
+    
+    for g in range(3):
+        p = maternal_alt_frac_options[g]
+        log_pmfs = [_log_binomial_pmf_global(k, n, p) for k, n in zip(m_alt, m_n)]
+        maternal_loglik[:, g] = log_pmfs
+    
+    maternal_genotypes_idx = np.argmax(maternal_loglik, axis=1)
+    genotype_labels = ['0/0', '0/1', '1/1']
+    df_clean['maternal_genotype'] = [genotype_labels[i] for i in maternal_genotypes_idx]
 
+    # Main likelihood computation
     logL_disomy = 0.0
     logL_trisomy = 0.0
-    console.print(f"[green]Scoring {len(df)} SNPs with fixed maternal genotypes[/green]")
+    
+    console.print(f"[green]Calculating likelihood ratio for {len(df_clean)} SNPs with maternal genotypes[/green]")
+    
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TimeElapsedColumn(),
+        console=console
+    ) as progress:
+        task = progress.add_task("Computing likelihood ratios...", total=len(df_clean))
+        
+        for idx, snp in df_clean.iterrows():
+            ref_count = int(snp[ref_col])
+            alt_count = int(snp[alt_col])
+            depth = ref_count + alt_count
+            af = float(snp['af'])
+            gm = snp['maternal_genotype']  # Use inferred maternal genotype
 
-    # Loop SNPs
-    for idx, snp in df.iterrows():
-        gm = maternal_calls[idx]
-        ref_c = int(snp[ref_col]); alt_c = int(snp[alt_col])
-        depth = ref_c + alt_c; af = float(snp['af'])
-        pater_pr = hwe_priors(af)
+            paternal_geno_priors = genotype_priors(af)
+            
+            log_terms_disomy = []
+            log_terms_trisomy = []
+            
+            # Marginalize over paternal genotypes
+            for gp in genotype_labels:
+                p_gp = paternal_geno_priors[gp]
+                if p_gp <= 0.0:
+                    continue
+                log_p_gp = math.log(p_gp)
+                
+                # Disomy calculation
+                fetal_dist_dis = get_fetal_prob_disomy(gm, gp)
+                d_maternal = sum(int(allele) for allele in gm.split('/'))
+                
+                for gf, p_gf in fetal_dist_dis.items():
+                    if p_gf <= 0.0:
+                        continue
+                    log_p_gf = math.log(p_gf)
+                    d_fetal = sum(int(allele) for allele in gf.split('/'))
+                    p_alt_exp = ((1.0 - fetal_fraction) * (d_maternal / 2.0) +
+                                 fetal_fraction * (d_fetal / 2.0))
+                    log_p_obs = _log_binomial_pmf_global(alt_count, depth, p_alt_exp)
+                    if log_p_obs > float('-inf'):
+                        log_terms_disomy.append(log_p_gp + log_p_gf + log_p_obs)
 
-        dis_terms = []
-        tri_terms = []
-        # maternal dosage
-        d_mat = sum(map(int, gm.split('/')))
+                # Trisomy calculation
+                fetal_dist_tri = get_fetal_prob_trisomy(gm, gp)
+                
+                for d_fetal, p_fd in fetal_dist_tri.items():
+                    if p_fd <= 0.0:
+                        continue
+                    log_p_fd = math.log(p_fd)
+                    p_alt_exp_tri = ((1.0 - 1.5 * fetal_fraction) * (d_maternal / 2.0) +
+                                     1.5 * fetal_fraction * (d_fetal / 3.0))
+                    log_p_obs_tri = _log_binomial_pmf_global(alt_count, depth, p_alt_exp_tri)
+                    if log_p_obs_tri > float('-inf'):
+                        log_terms_trisomy.append(log_p_gp + log_p_fd + log_p_obs_tri)
 
-        for gp, p_gp in pater_pr.items():
-            if p_gp <= 0: continue
-            log_p_gp = math.log(p_gp)
-            # disomy
-            for gf,p_f in fetus_disomy(gm,gp).items():
-                if p_f<=0: continue
-                d_f = sum(map(int, gf.split('/')))
-                p_alt = (1-fetal_fraction)*(d_mat/2) + fetal_fraction*(d_f/2)
-                log_obs = log_binom_pmf(alt_c, depth, p_alt)
-                dis_terms.append(log_p_gp + math.log(p_f) + log_obs)
-            # trisomy
-            for d_f,p_f in fetus_trisomy(gm,gp).items():
-                if p_f<=0: continue
-                p_alt = (1-1.5*fetal_fraction)*(d_mat/2) + 1.5*fetal_fraction*(d_f/3)
-                log_obs = log_binom_pmf(alt_c, depth, p_alt)
-                tri_terms.append(log_p_gp + math.log(p_f) + log_obs)
+            # Compute SNP-level log-likelihoods
+            if log_terms_disomy:
+                logL_disomy += _log_sum_exp_global(np.array(log_terms_disomy))
+            
+            if log_terms_trisomy:
+                logL_trisomy += _log_sum_exp_global(np.array(log_terms_trisomy))
+            
+            progress.advance(task)
 
-        if dis_terms:
-            logL_disomy += logsumexp(np.array(dis_terms))
-        else:
-            return 0.0
-        if tri_terms:
-            logL_trisomy += logsumexp(np.array(tri_terms))
-        else:
-            return 0.0
-
-    # final LR
-    delta = logL_trisomy - logL_disomy
-    if delta > 700: return float('inf')
-    if delta < -700: return 0.0
-    return math.exp(delta)
+    # Compute final likelihood ratio
+    delta_logL = logL_trisomy - logL_disomy
+    
+    if delta_logL > 700:
+        return float('inf')
+    elif delta_logL < -700:
+        return 0.0
+    else:
+        return math.exp(delta_logL)
 
 
 @click.command()
@@ -1148,12 +1194,14 @@ def main(
 
                     # Calculate likelihood ratio for target chromosome
                     console.print(f"[cyan]Calculating likelihood ratio for {chr_name}...[/cyan]")
-                    lr = LR_calculator_with_maternal_reads(target_data, 
-                                                           est_ff, 
-                                                           ref_col=cfdna_ref_col, 
-                                                           alt_col=cfdna_alt_col, 
-                                                           maternal_ref_col=wbc_ref_col, 
-                                                           maternal_alt_col=wbc_alt_col)
+                    lr = LR_calculator_with_maternal_reads(
+                        target_data, 
+                        est_ff, 
+                        ref_col=cfdna_ref_col, 
+                        alt_col=cfdna_alt_col, 
+                        maternal_ref_col=wbc_ref_col, 
+                        maternal_alt_col=wbc_alt_col
+                    )
                     # Store results
                     results[f'{chr_name}_lr'] = lr
                     results[f'{chr_name}_ff'] = est_ff
@@ -1175,12 +1223,14 @@ def main(
 
                     # Calculate likelihood ratio for target chromosome
                     console.print(f"[cyan]Calculating likelihood ratio for {chr_name}...[/cyan]")
-                    lr = LR_calculator_with_maternal_reads(target_data, 
-                                                           est_ff, 
-                                                           ref_col=cfdna_ref_col, 
-                                                           alt_col=cfdna_alt_col, 
-                                                           maternal_ref_col=model_ref_col, 
-                                                           maternal_alt_col=model_alt_col)
+                    lr = LR_calculator_with_maternal_reads(
+                        target_data, 
+                        est_ff, 
+                        ref_col=cfdna_ref_col, 
+                        alt_col=cfdna_alt_col, 
+                        maternal_ref_col=model_ref_col, 
+                        maternal_alt_col=model_alt_col
+                    )
                     
                     # Store results
                     results[f'{chr_name}_lr'] = lr
