@@ -703,9 +703,14 @@ def estimate_fetal_fraction_with_maternal_reads(
     console.print(f"[cyan]Using {ncpus} CPU cores for grid search from {f_min} to {f_max}[/cyan]")
 
     # Shared data tuple
-    shared = (p_arr, n_arr, alt_arr, log_prior_G, maternal_alt_frac, fetal_alt_frac)
-    # Split f_values for parallel chunks
-    chunks = np.array_split(f_values, ncpus)
+    shared_data = (p_arr, n_arr, alt_arr, log_prior_G, maternal_alt_frac, fetal_alt_frac)
+    
+    # Split FF values into chunks for parallel processing
+    chunk_size = max(1, len(f_values) // ncpus)
+    f_value_chunks = [f_values[i:i + chunk_size] for i in range(0, len(f_values), chunk_size)]
+    
+    # Prepare arguments for worker processes
+    worker_args = [(chunk, shared_data) for chunk in f_value_chunks]
 
     # Progress bar
     with Progress(
@@ -715,15 +720,15 @@ def estimate_fetal_fraction_with_maternal_reads(
         TimeElapsedColumn(),
         console=console
     ) as progress:
-        task = progress.add_task("Estimating fetal fraction...", total=len(chunks))
+        task = progress.add_task("Estimating fetal fraction...", total=len(f_value_chunks))
         if ncpus == 1:
-            for chunk in chunks:
-                results = _compute_ff_likelihood_chunk((chunk, shared))
+            for args in worker_args:
+                results = _compute_ff_likelihood_chunk(args)
                 log_likelihoods.update(results)
                 progress.advance(task)
         else:
             with Pool(processes=ncpus) as pool:
-                asyncs = [pool.apply_async(_compute_ff_likelihood_chunk, ((chunk, shared),)) for chunk in chunks]
+                asyncs = [pool.apply_async(_compute_ff_likelihood_chunk, (args,)) for args in worker_args]
                 for a in asyncs:
                     res = a.get()
                     log_likelihoods.update(res)
