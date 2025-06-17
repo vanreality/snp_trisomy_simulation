@@ -1023,13 +1023,13 @@ def LR_calculator_with_maternal_reads(
 )
 @click.option(
     '--model-ref-col',
-    default='maternal_ref_reads_from_model',
-    help='Column name for modeled maternal reference reads (default: maternal_ref_reads_from_model)'
+    default='fetal_ref_reads_from_model',
+    help='Column name for modeled fetal reference reads (default: fetal_ref_reads_from_model)'
 )
 @click.option(
     '--model-alt-col',
-    default='maternal_alt_reads_from_model',
-    help='Column name for modeled maternal alternative reads (default: maternal_alt_reads_from_model)'
+    default='fetal_alt_reads_from_model',
+    help='Column name for modeled fetal alternative reads (default: fetal_alt_reads_from_model)'
 )
 @click.option(
     '--ncpus',
@@ -1209,27 +1209,23 @@ def main(
                     console.print(f"[green]✓ {chr_name}: FF = {est_ff:.3f}, LR = {lr:.2e}[/green]")
 
                 elif mode == 'cfDNA+model':
-                    est_ff, _ = estimate_fetal_fraction_with_maternal_reads(
+                    est_ff, _ = estimate_fetal_fraction(
                         background_data,
                         f_min=ff_min,
                         f_max=ff_max,
                         f_step=ff_step,
                         ncpus=ncpus,
-                        ref_col=cfdna_ref_col,
-                        alt_col=cfdna_alt_col,
-                        maternal_ref_col=model_ref_col,
-                        maternal_alt_col=model_alt_col
+                        ref_col=model_ref_col,
+                        alt_col=model_alt_col
                     )
 
                     # Calculate likelihood ratio for target chromosome
                     console.print(f"[cyan]Calculating likelihood ratio for {chr_name}...[/cyan]")
-                    lr = LR_calculator_with_maternal_reads(
+                    lr = LR_calculator(
                         target_data, 
                         est_ff, 
-                        ref_col=cfdna_ref_col, 
-                        alt_col=cfdna_alt_col, 
-                        maternal_ref_col=model_ref_col, 
-                        maternal_alt_col=model_alt_col
+                        ref_col=model_ref_col, 
+                        alt_col=model_alt_col
                     )
                     
                     # Store results
