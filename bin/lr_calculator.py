@@ -1131,7 +1131,7 @@ def main(
         console.print(f"[green]✓ Loaded {len(df)} SNPs from {df['chr'].nunique()} chromosomes[/green]")
         
         # Initialize results storage
-        results = {}
+        results_list = []
         
         # Process each target chromosome
         for target_chr in target_chromosomes:
@@ -1174,8 +1174,11 @@ def main(
                                        alt_col=cfdna_alt_col)
                     
                     # Store results
-                    results[f'{chr_name}_lr'] = lr
-                    results[f'{chr_name}_ff'] = est_ff
+                    results_list.append({
+                        'Chrom': chr_name,
+                        'LR': lr,
+                        'Fetal Fraction': est_ff
+                    })
                     
                     console.print(f"[green]✓ {chr_name}: FF = {est_ff:.3f}, LR = {lr:.2e}[/green]")
 
@@ -1203,8 +1206,11 @@ def main(
                         maternal_alt_col=wbc_alt_col
                     )
                     # Store results
-                    results[f'{chr_name}_lr'] = lr
-                    results[f'{chr_name}_ff'] = est_ff
+                    results_list.append({
+                        'Chrom': chr_name,
+                        'LR': lr,
+                        'Fetal Fraction': est_ff
+                    })
                     
                     console.print(f"[green]✓ {chr_name}: FF = {est_ff:.3f}, LR = {lr:.2e}[/green]")
 
@@ -1229,8 +1235,11 @@ def main(
                     )
                     
                     # Store results
-                    results[f'{chr_name}_lr'] = lr
-                    results[f'{chr_name}_ff'] = est_ff
+                    results_list.append({
+                        'Chrom': chr_name,
+                        'LR': lr,
+                        'Fetal Fraction': est_ff
+                    })
                     
                     console.print(f"[green]✓ {chr_name}: FF = {est_ff:.3f}, LR = {lr:.2e}[/green]")
 
@@ -1241,13 +1250,13 @@ def main(
                 continue
         
         # Save results
-        if results:
+        if results_list:
             console.print(f"\n[cyan]Saving results to {output_path}...[/cyan]")
-            results_df = pd.DataFrame([results])
+            results_df = pd.DataFrame(results_list, columns=['Chrom', 'LR', 'Fetal Fraction'])
             results_df.to_csv(output_path, sep='\t', index=False)
             
             # Display summary table
-            display_results_summary(results, target_chromosomes)
+            display_results_summary(results_df)
             console.print(f"[bold green]✓ Analysis complete! Results saved to {output_path}[/bold green]")
         else:
             console.print("[red]✗ No results generated - check input data and parameters[/red]")
@@ -1386,13 +1395,12 @@ def load_and_validate_data(
     return df
 
 
-def display_results_summary(results: Dict, target_chromosomes: list) -> None:
+def display_results_summary(results_df: pd.DataFrame) -> None:
     """
     Display a formatted summary table of results.
     
     Args:
-        results: Dictionary containing LR and FF results
-        target_chromosomes: List of analyzed chromosomes
+        results_df: DataFrame containing LR and FF results with columns 'Chrom', 'LR', 'Fetal Fraction'.
     """
     table = Table(title="Analysis Results Summary")
     table.add_column("Chromosome", justify="center", style="cyan")
@@ -1400,31 +1408,27 @@ def display_results_summary(results: Dict, target_chromosomes: list) -> None:
     table.add_column("Likelihood Ratio", justify="right", style="yellow")
     table.add_column("Interpretation", justify="center", style="magenta")
     
-    for chr_num in target_chromosomes:
-        chr_name = f"chr{chr_num}"
-        ff_key = f"{chr_name}_ff"
-        lr_key = f"{chr_name}_lr"
+    for _, row in results_df.iterrows():
+        chr_name = row['Chrom']
+        ff_val = row['Fetal Fraction']
+        lr_val = row['LR']
         
-        if ff_key in results and lr_key in results:
-            ff_val = results[ff_key]
-            lr_val = results[lr_key]
-            
-            # Simple interpretation logic
-            if lr_val > 10:
-                interpretation = "Strong Evidence"
-            elif lr_val > 1:
-                interpretation = "Moderate Evidence"
-            elif lr_val == 1:
-                interpretation = "No Evidence"
-            else:
-                interpretation = "Against Trisomy"
-            
-            table.add_row(
-                str(chr_num),
-                f"{ff_val:.3f}",
-                f"{lr_val:.2e}" if lr_val != float('inf') else "∞",
-                interpretation
-            )
+        # Simple interpretation logic
+        if lr_val > 10:
+            interpretation = "Strong Evidence"
+        elif lr_val > 1:
+            interpretation = "Moderate Evidence"
+        elif lr_val == 1:
+            interpretation = "No Evidence"
+        else:
+            interpretation = "Against Trisomy"
+        
+        table.add_row(
+            str(chr_name.replace("chr", "")),
+            f"{ff_val:.3f}",
+            f"{lr_val:.2e}" if lr_val != float('inf') else "∞",
+            interpretation
+        )
     
     console.print(table)
 

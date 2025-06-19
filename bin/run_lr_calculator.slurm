@@ -16,7 +16,7 @@ simulated_ff_step=$8
 num_repeats=$9
 
 for ff in $(seq ${simulated_ff_min} ${simulated_ff_step} ${simulated_ff_max}); do
-    if [ "${mode}" = "cfDNA_model" ]; then
+    if [ "${mode}" = "cfDNA+model" ]; then
         ff_min=$(echo "define max(a, b) { if (a > b) return a else return b }; max(${ff}*3-0.05, 0.001)" | bc -l)
         ff_max=$(echo "${ff}*3+0.05" | bc -l)
     else
