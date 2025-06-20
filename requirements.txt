@@ -1,6 +1,10 @@
-numpy>=1.21.0
-pandas>=1.3.0
-click>=8.0.0
+click
+pandas
+numpy
+biopython
+pyarrow
+scipy>=1.7.0
 rich>=12.0.0
 tqdm>=4.62.0
-scipy>=1.7.0 
+intervaltree
+lark 
