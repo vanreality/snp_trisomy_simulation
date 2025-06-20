@@ -315,12 +315,8 @@ def process_batch(batch: pd.DataFrame, reference_genome: dict, snp_trees: dict, 
             continue
 
         # Check if the read overlaps with any SNPs
-        if snp_tree.overlaps(start_pos, end_pos):
-            # Get the SNPs that overlap with the read
-            overlapping_snps = snp_tree.at(start_pos, end_pos)
-            if not overlapping_snps:
-                continue
-
+        overlapping_snps = snp_tree.overlap(start_pos, end_pos)
+        if overlapping_snps:
             sequence = row['seq']
             prob = row['prob_class_1']
             name = row['name']
