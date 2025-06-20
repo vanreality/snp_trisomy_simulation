@@ -197,7 +197,6 @@ def build_snp_trees(snp_list: Path) -> dict:
     return snp_trees
 
 def extract_snp_info_from_alignment(
-    reference_seq: str, 
     alignment: PairwiseAligner, 
     ref_start_pos: int, 
     original_query: str, 
@@ -210,7 +209,6 @@ def extract_snp_info_from_alignment(
     to see if the read contains the reference or alternative allele.
 
     Args:
-        reference_seq (str): The reference sequence slice used for alignment.
         alignment (PairwiseAligner): The alignment object from Biopython.
         ref_start_pos (int): The 0-based starting position of the reference_seq
             in the chromosome.
@@ -226,12 +224,20 @@ def extract_snp_info_from_alignment(
     if not snp_sites:
         return results
 
-    # alignment.coordinates is a (2, N) array
-    # row 0: indices in the target (reference)
-    # row 1: indices in the query (read)
-    # -1 indicates a gap
-    ref_coords = alignment.coordinates[0]
-    query_coords = alignment.coordinates[1]
+    aligned_ref = str(alignment[0])
+    aligned_query = str(alignment[1])
+    aligned_ref_pos = alignment.coordinates[0][0]
+    algined_query_pos = alignment.coordinates[1][0]
+
+    # Recover the M bases in the query sequence
+    recovered_query = ""
+    for q_base in aligned_query:
+        if q_base != '-':
+            recovered_query += original_query[algined_query_pos]
+            algined_query_pos += 1
+        else:
+            recovered_query += '-'
+    aligned_query = recovered_query
 
     for snp_interval in snp_sites:
         snp_data = snp_interval.data
@@ -243,32 +249,18 @@ def extract_snp_info_from_alignment(
         if len(snp_ref) != 1 or len(snp_alt) != 1:
             continue
 
-        # Convert 1-based SNP position to 0-based index in reference_seq
-        snp_index_in_ref_seq = snp_pos - 1 - ref_start_pos
-
-        if not (0 <= snp_index_in_ref_seq < len(ref_coords)):
-            continue
-
-        # Find where in the alignment this SNP position is
-        # np.where returns a tuple of arrays, one for each dimension
-        alignment_indices = np.where(ref_coords == snp_index_in_ref_seq)[0]
-
-        if alignment_indices.size == 0:
-            # SNP position is not in the aligned part of the reference (e.g., in an intron for RNA-seq)
-            continue
-
-        alignment_idx = alignment_indices[0]
-        query_idx = query_coords[alignment_idx]
-
-        if query_idx == -1:
-            # Deletion in read at SNP position, doesn't support REF or ALT for a simple SNP
-            continue
-        
-        if query_idx >= len(original_query):
-            # Should not happen with a valid alignment, but as a safeguard
-            continue
-
-        read_base = original_query[int(query_idx)]
+        off_set = snp_pos - 1 - ref_start_pos - aligned_ref_pos
+        idx = 0
+        read_base = 'N'
+        for i, base in enumerate(aligned_ref):
+            if base != '-':
+                if idx == off_set:
+                    if i >= len(aligned_query):
+                        read_base = 'N'
+                        break
+                    read_base = aligned_query[i]
+                    break
+                idx += 1
         
         status = -1  # -1 for unknown/other
         if read_base == snp_alt:
@@ -281,6 +273,9 @@ def extract_snp_info_from_alignment(
                 'pos': snp_pos,
                 'status': status,
                 'chr': snp_data['chr_norm'], # Use normalized chromosome
+                'ref': snp_ref,
+                'alt': snp_alt,
+                'af': snp_data['af'],
             })
             
     return results
@@ -341,7 +336,7 @@ def process_batch(batch: pd.DataFrame, reference_genome: dict, snp_trees: dict, 
             if alignment:
                 # Identify SNP sites and pileup status
                 snp_results = extract_snp_info_from_alignment(
-                    ref_region, alignment, ref_extract_start, sequence, overlapping_snps
+                    alignment, ref_extract_start, sequence, overlapping_snps
                 )
                 
                 # Add data to results
@@ -349,6 +344,9 @@ def process_batch(batch: pd.DataFrame, reference_genome: dict, snp_trees: dict, 
                     results.append({
                         'chr': snp['chr'],
                         'pos': snp['pos'],
+                        'ref': snp['ref'],
+                        'alt': snp['alt'],
+                        'af': snp['af'],
                         'status': snp['status'],
                         'prob_class_1': prob,
                         'name': name,
@@ -456,20 +454,45 @@ def snp_pileup(results_df: pd.DataFrame) -> pd.DataFrame:
     grouped = results_df.groupby(['chr', 'pos'])
     
     # Calculate pileup
-    pileup_df = grouped.apply(
-        lambda g: pd.Series({
-            'chr': g['chr'].iloc[0],
-            'pos': g['pos'].iloc[0],
-            'ref': g['ref'].iloc[0],
-            'alt': g['alt'].iloc[0],
-            'af': g['af'].iloc[0],
-            'cfDNA_ref_reads': g[g['status'] == 0].shape[0],
-            'cfDNA_alt_reads': g[g['status'] == 1].shape[0],
-            'current_depth': g.shape[0],
-            'fetal_ref_reads_from_model': int(g[g['status'] == 0]['prob_class_1'].sum() / g['prob_class_1'].sum()) if g['prob_class_1'].sum() > 0 else 0,
-            'fetal_alt_reads_from_model': int(g[g['status'] == 1]['prob_class_1'].sum() / g['prob_class_1'].sum()) if g['prob_class_1'].sum() > 0 else 0,
-        })
-    ).reset_index()
+    df = results_df
+    df['prob_ref'] = df['prob_class_1'].where(df['status'] == 0, 0.0)
+    df['prob_alt'] = df['prob_class_1'].where(df['status'] == 1, 0.0)
+
+    pileup_df = (
+        df
+        .groupby(['chr','pos'], as_index=False)
+        .agg(
+            # first-value pulls out your static columns
+            ref               = ('ref',               'first'),
+            alt               = ('alt',               'first'),
+            af                = ('af',                'first'),
+            # simple counts
+            cfDNA_ref_reads   = ('status',    lambda x: (x==0).sum()),
+            cfDNA_alt_reads   = ('status',    lambda x: (x==1).sum()),
+            current_depth     = ('status',           'size'),
+            # sums of probabilities
+            total_prob        = ('prob_class_1',      'sum'),
+            sum_prob_ref      = ('prob_ref',          'sum'),
+            sum_prob_alt      = ('prob_alt',          'sum'),
+        )
+    )
+
+    # avoid division by zero
+    mask = pileup_df['total_prob'] > 0
+    pileup_df.loc[mask, 'fetal_ref_reads_from_model'] = (
+        pileup_df.loc[mask, 'sum_prob_ref'] / pileup_df.loc[mask, 'total_prob']
+    )
+    pileup_df.loc[~mask, 'fetal_ref_reads_from_model'] = 0
+
+    pileup_df.loc[mask, 'fetal_alt_reads_from_model'] = (
+        pileup_df.loc[mask, 'sum_prob_alt'] / pileup_df.loc[mask, 'total_prob']
+    )
+    pileup_df.loc[~mask, 'fetal_alt_reads_from_model'] = 0
+
+    pileup_df = pileup_df.drop(columns=['total_prob','sum_prob_ref','sum_prob_alt'])
+
+    pileup_df['fetal_ref_reads_from_model'] = pileup_df['fetal_ref_reads_from_model'].astype(int)
+    pileup_df['fetal_alt_reads_from_model'] = pileup_df['fetal_alt_reads_from_model'].astype(int)
     
     return pileup_df
 
@@ -503,9 +526,14 @@ def main(parquet, fasta, snp_list, output, batch_size, num_workers, n_bp_downstr
         n_bp_upstream=n_bp_upstream
     )
     
+    # Optionally, write raw per-read results for debugging
+    raw_output_path = f"{output}_raw_snp_calls.tsv.gz"
+    results_df.to_csv(raw_output_path, index=False, sep='\t', compression='gzip')
+    logger.info(f"Raw per-read results written to: {raw_output_path}")
+
     # Calculate final pileup from all read data
     pileup_results_df = snp_pileup(results_df)
-    
+
     # Write detailed pileup results to a TSV file
     if not pileup_results_df.empty:
         tsv_output = f"{output}_pileup.tsv.gz"
@@ -513,11 +541,6 @@ def main(parquet, fasta, snp_list, output, batch_size, num_workers, n_bp_downstr
         logger.info(f"Pileup results written to: {tsv_output}")
     else:
         logger.warning("Final pileup data is empty. No output file was generated.")
-
-    # Optionally, write raw per-read results for debugging
-    raw_output_path = f"{output}_raw_snp_calls.tsv.gz"
-    results_df.to_csv(raw_output_path, index=False, sep='\t', compression='gzip')
-    logger.info(f"Raw per-read results written to: {raw_output_path}")
 
     logger.info("Analysis complete.")
 
