@@ -3,124 +3,118 @@ import numpy as np
 import click
 from Bio import SeqIO
 from Bio.Align import PairwiseAligner
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 from functools import partial
 import sys
 import os
-import logging
 import pyarrow.parquet as pq
 from pathlib import Path
 from intervaltree import Interval, IntervalTree
-from rich.logging import RichHandler
-from tqdm import tqdm
+from rich.console import Console
+from rich.progress import Progress
 
-# Configure logging using rich for better output
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(message)s',
-    datefmt='[%X]',
-    handlers=[RichHandler(rich_tracebacks=True)]
-)
-logger = logging.getLogger(__name__)
+console = Console()
 
 def read_reference_genome(fasta_file: str) -> dict:
+    """Reads the reference genome from a FASTA file.
+
+    Args:
+        fasta_file: The path to the FASTA file.
+
+    Returns:
+        A dictionary mapping chromosome IDs to their sequences.
     """
-    Read the reference genome from FASTA file.
-    Returns a dictionary of chromosome sequences.
-    """
-    logger.info(f"Reading reference genome from: {fasta_file}")
+    console.log(f"Reading reference genome from: {fasta_file}")
     reference = {}
     for record in SeqIO.parse(fasta_file, "fasta"):
-        # Convert sequence to uppercase
         reference[record.id] = str(record.seq).upper()
     return reference
 
 def extract_region_from_reference(reference: dict, chrom: str, start: int, end: int) -> str:
-    """
-    Extract a region from the reference genome.
+    """Extracts a region from the reference genome.
+
+    Args:
+        reference: A dictionary of chromosome sequences.
+        chrom: The chromosome name.
+        start: The start coordinate.
+        end: The end coordinate.
+
+    Returns:
+        The extracted sequence, or None if the region is invalid.
     """
     if chrom not in reference:
-        # Try adding/removing 'chr' prefix
         alt_chrom = chrom.replace('chr', '') if chrom.startswith('chr') else f'chr{chrom}'
         if alt_chrom in reference:
             chrom = alt_chrom
         else:
-            logger.error(f"Chromosome {chrom} not found in reference genome")
+            console.log(f"[bold red]ERROR:[/bold red] Chromosome {chrom} not found in reference genome")
             return None
     
     try:
         return reference[chrom][start:end]
     except IndexError:
-        logger.error(f"Invalid coordinates for chromosome {chrom}: {start}-{end}")
+        console.log(f"[bold red]ERROR:[/bold red] Invalid coordinates for chromosome {chrom}: {start}-{end}")
         return None
 
 def local_realign(seq: str, ref_seq: str) -> PairwiseAligner:
+    """Performs local re-alignment between a read and a reference sequence.
+
+    Args:
+        seq: The read sequence.
+        ref_seq: The reference sequence.
+
+    Returns:
+        The best alignment object, or None if no alignment is found.
     """
-    Perform local re-alignment between a read sequence and reference sequence
-    using the Bio.Align.PairwiseAligner.
-    Returns the alignment.
-    """
-    # Replace 'M' with 'C' for alignment purposes
     seq_for_alignment = seq.replace('M', 'C')
-    
-    # Configure aligner for local alignment
     aligner = PairwiseAligner(scoring='blastn')
     aligner.mode = 'local'
-    
-    # Perform alignment
     alignments = aligner.align(ref_seq, seq_for_alignment)
     
-    # Get the best alignment
     if not alignments:
         return None
     
     return alignments[0]
 
 def extract_AF(row: pd.Series) -> float:
-    """
-    Parse the AF (allele frequency) field from the INFO column.
-    
+    """Parses the Allele Frequency (AF) from the INFO column of a VCF record.
+
     Args:
-        row: Pandas Series containing variant information with 'info' column
-        
+        row: A pandas Series representing a variant, requiring an 'info' column.
+
     Returns:
-        Allele frequency as float
-        
-    Raises:
-        ValueError: If AF field cannot be parsed
+        The allele frequency as a float, or np.nan if parsing fails.
     """
     try:
         info = row['info']
         if 'AF=' not in info:
-            raise ValueError(f"AF field not found in INFO column: {info}")
+            return np.nan
         
         af_str = info.split('AF=')[1].split(';')[0]
         af = float(af_str)
         
         if not 0 <= af <= 1:
-            raise ValueError(f"Invalid allele frequency: {af}")
+            return np.nan
             
         return af
-    except (IndexError, ValueError) as e:
-        raise ValueError(f"Failed to parse AF from INFO: {info}") from e
+    except (IndexError, ValueError):
+        return np.nan
 
 def load_snp_data(file_path: Path) -> pd.DataFrame:
-    """
-    Load and validate SNP data from file.
-    
+    """Loads and validates SNP data from a VCF-like file.
+
     Args:
-        file_path: Path to the SNP data file
-        
+        file_path: The path to the SNP data file.
+
     Returns:
-        Validated DataFrame with AF column added
-        
+        A validated DataFrame with an 'af' column.
+
     Raises:
-        SNPSimulationError: If file cannot be loaded or is invalid
+        ValueError: If the file is not found, empty, or cannot be processed.
     """
     try:
-        # Try to load the file
-        potential_df = pd.read_csv(
+        snp_df = pd.read_csv(
             file_path,
             sep='\t',
             names=['chr', 'pos', 'id', 'ref', 'alt', 'qual', 'filter', 'info'],
@@ -128,34 +122,29 @@ def load_snp_data(file_path: Path) -> pd.DataFrame:
             usecols=[0, 1, 2, 3, 4, 5, 6, 7]
         )
         
-        if potential_df.empty:
+        if snp_df.empty:
             raise ValueError("SNP data file is empty")
         
-        # Apply AF extraction with error handling
-        logger.info("Extracting allele frequencies (AF)...")
-        af_values = []
-        invalid_count = 0
+        console.log("Extracting allele frequencies (AF)...")
+        with Progress() as progress:
+            task = progress.add_task("[cyan]Extracting AF...", total=len(snp_df))
+            af_values = []
+            for _, row in snp_df.iterrows():
+                af_values.append(extract_AF(row))
+                progress.update(task, advance=1)
         
-        for idx, row in tqdm(potential_df.iterrows(), total=len(potential_df), desc="Extracting AF"):
-            try:
-                af = extract_AF(row)
-                af_values.append(af)
-            except ValueError:
-                af_values.append(np.nan)
-                invalid_count += 1
+        snp_df['af'] = af_values
         
-        potential_df['af'] = af_values
-        
-        # Remove rows with invalid AF values
-        potential_df = potential_df.dropna(subset=['af'])
+        invalid_count = snp_df['af'].isna().sum()
+        snp_df.dropna(subset=['af'], inplace=True)
 
         if invalid_count > 0:
-            logger.warning(f"Removed {invalid_count} variants due to missing or invalid AF.")
+            console.log(f"[yellow]WARNING:[/yellow] Removed {invalid_count} variants due to missing or invalid AF.")
 
-        if potential_df.empty:
+        if snp_df.empty:
             raise ValueError("No valid variants remaining after AF extraction")
         
-        return potential_df
+        return snp_df
         
     except FileNotFoundError:
         raise ValueError(f"SNP data file not found: {file_path}")
@@ -165,35 +154,40 @@ def load_snp_data(file_path: Path) -> pd.DataFrame:
         raise ValueError(f"Failed to load SNP data: {e}") from e
 
 def build_snp_trees(snp_list: Path) -> dict:
+    """Builds interval trees for each chromosome from a list of SNPs.
+
+    Args:
+        snp_list: Path to the SNP data file.
+
+    Returns:
+        A dictionary mapping chromosome names to their IntervalTree.
     """
-    Build interval trees for each chromosome from a list of SNPs.
-    """
-    logger.info(f"Loading SNP data from {snp_list}...")
+    console.log(f"Loading SNP data from {snp_list}...")
     snp_df = load_snp_data(snp_list)
     
     snp_trees = {}
-    logger.info("Building SNP interval trees...")
+    console.log("Building SNP interval trees...")
     
-    # Filter for standard chromosomes
     chromosomes = [f'chr{i}' for i in range(1, 23)]
     snp_df['chr'] = snp_df['chr'].astype(str)
-    # Handle both 'chr1' and '1' formats
     snp_df['chr_norm'] = snp_df['chr'].apply(lambda x: f'chr{x}' if not x.startswith('chr') else x)
     
-    # Use only standard chromosomes
     snp_df = snp_df[snp_df['chr_norm'].isin(chromosomes)]
     
-    for chrom, group in tqdm(snp_df.groupby('chr_norm'), desc="Building trees"):
-        tree = IntervalTree()
-        for _, snp in group.iterrows():
-            pos = snp['pos']
-            # VCF is 1-based, IntervalTree is 0-based, end-exclusive
-            start = pos - 1
-            end = start + len(snp['ref'])
-            tree[start:end] = snp.to_dict()
-        snp_trees[chrom] = tree
+    grouped_chroms = snp_df.groupby('chr_norm')
+    with Progress() as progress:
+        task = progress.add_task("[cyan]Building trees...", total=len(grouped_chroms))
+        for chrom, group in grouped_chroms:
+            tree = IntervalTree()
+            for _, snp in group.iterrows():
+                pos = snp['pos']
+                start = pos - 1
+                end = start + len(snp['ref'])
+                tree[start:end] = snp.to_dict()
+            snp_trees[chrom] = tree
+            progress.update(task, advance=1)
         
-    logger.info(f"Built interval trees for {len(snp_trees)} chromosomes.")
+    console.log(f"Built interval trees for {len(snp_trees)} chromosomes.")
     return snp_trees
 
 def extract_snp_info_from_alignment(
@@ -202,22 +196,21 @@ def extract_snp_info_from_alignment(
     original_query: str, 
     snp_sites: set
 ) -> list:
-    """
-    Determine if a read supports REF or ALT alleles for given SNP sites.
+    """Determines if a read supports REF or ALT alleles for given SNP sites.
 
-    Based on the local realignment, this function checks each overlapping SNP site
-    to see if the read contains the reference or alternative allele.
+    Based on local realignment, this function checks each overlapping SNP site
+    to determine if the read contains the reference or alternative allele.
 
     Args:
-        alignment (PairwiseAligner): The alignment object from Biopython.
-        ref_start_pos (int): The 0-based starting position of the reference_seq
+        alignment: The alignment object from Biopython.
+        ref_start_pos: The 0-based start position of the reference sequence
             in the chromosome.
-        original_query (str): The original read sequence.
-        snp_sites (set): A set of Interval objects representing overlapping SNPs.
+        original_query: The original read sequence.
+        snp_sites: A set of Interval objects for overlapping SNPs.
 
     Returns:
-        list: A list of dictionaries, where each dictionary contains info about a
-              SNP found in the read. Status is 0 for REF, 1 for ALT.
+        A list of dictionaries, each containing info about a SNP found
+        in the read. Status is 0 for REF, 1 for ALT.
     """
     results = []
     
@@ -245,7 +238,6 @@ def extract_snp_info_from_alignment(
         snp_ref = snp_data['ref']
         snp_alt = snp_data['alt']
 
-        # We only handle simple SNPs for now for simplicity and performance
         if len(snp_ref) != 1 or len(snp_alt) != 1:
             continue
 
@@ -262,7 +254,7 @@ def extract_snp_info_from_alignment(
                     break
                 idx += 1
         
-        status = -1  # -1 for unknown/other
+        status = -1
         if read_base == snp_alt:
             status = 1
         elif read_base == snp_ref:
@@ -280,80 +272,65 @@ def extract_snp_info_from_alignment(
             
     return results
 
-def process_batch(batch: pd.DataFrame, reference_genome: dict, snp_trees: dict, n_bp_downstream: int, n_bp_upstream: int) -> list:
-    """
-    Process a batch of sequences from the parquet file.
-    
+def process_batch(
+    batch: pd.DataFrame, 
+    reference_genome: dict, 
+    snp_trees: dict, 
+    n_bp_downstream: int, 
+    n_bp_upstream: int
+) -> list:
+    """Processes a batch of sequences from the Parquet file.
+
     Args:
-        batch: Pandas DataFrame containing a batch of sequence records
-        reference_genome: Dictionary of chromosome sequences
-        n_bp_downstream: Number of base pairs downstream to include in the reference extract
-        n_bp_upstream: Number of base pairs upstream to include in the reference extract
-        
+        batch: DataFrame with a batch of sequence records.
+        reference_genome: Dictionary of chromosome sequences.
+        snp_trees: Dictionary of SNP interval trees.
+        n_bp_downstream: Bases downstream for reference extraction.
+        n_bp_upstream: Bases upstream for reference extraction.
+
     Returns:
-        List of dictionaries with SNP site pileup data
+        A list of dictionaries with SNP site pileup data.
     """
     results = []
     
     for _, row in batch.iterrows():
         chr_name = row['chr']
-        # Normalize chromosome name to match snp_trees keys
         chr_name_norm = f'chr{chr_name}' if not chr_name.startswith('chr') else chr_name
 
-        start_pos = row['start']
-        end_pos = row['end']
-
-        if chr_name_norm in snp_trees:
-            snp_tree = snp_trees[chr_name_norm]
-        else:
-            # This can happen for non-standard chromosomes, so not an error
+        if chr_name_norm not in snp_trees:
             continue
 
-        # Check if the read overlaps with any SNPs
+        snp_tree = snp_trees[chr_name_norm]
+        start_pos, end_pos = row['start'], row['end']
+
         overlapping_snps = snp_tree.overlap(start_pos, end_pos)
         if overlapping_snps:
-            sequence = row['seq']
-            prob = row['prob_class_1']
-            name = row['name']
-            insert_size = row['insert_size']
-            chr_dmr = row['chr_dmr']
-            start_dmr = row['start_dmr']
-            end_dmr = row['end_dmr']
-            
-            # Extract reference region with extra bases upstream and downstream
             ref_extract_start = start_pos - n_bp_upstream
             ref_extract_end = end_pos + n_bp_downstream
             ref_region = extract_region_from_reference(
                 reference_genome, chr_name_norm, ref_extract_start, ref_extract_end
             )
             
-            if ref_region is None or len(ref_region) == 0:
+            if not ref_region:
                 continue
             
-            # Perform local re-alignment
+            sequence = row['seq']
             alignment = local_realign(sequence, ref_region)
             
             if alignment:
-                # Identify SNP sites and pileup status
                 snp_results = extract_snp_info_from_alignment(
                     alignment, ref_extract_start, sequence, overlapping_snps
                 )
                 
-                # Add data to results
                 for snp in snp_results:
                     results.append({
-                        'chr': snp['chr'],
-                        'pos': snp['pos'],
-                        'ref': snp['ref'],
-                        'alt': snp['alt'],
-                        'af': snp['af'],
-                        'status': snp['status'],
-                        'prob_class_1': prob,
-                        'name': name,
-                        'insert_size': insert_size,
-                        'chr_dmr': chr_dmr,
-                        'start_dmr': start_dmr,
-                        'end_dmr': end_dmr
+                        **snp,
+                        'prob_class_1': row['prob_class_1'],
+                        'name': row['name'],
+                        'insert_size': row['insert_size'],
+                        'chr_dmr': row['chr_dmr'],
+                        'start_dmr': row['start_dmr'],
+                        'end_dmr': row['end_dmr']
                     })
     
     return results
@@ -367,39 +344,37 @@ def process_parquet_file(
     n_bp_downstream: int = 20, 
     n_bp_upstream: int = 20
 ) -> pd.DataFrame:
-    """
-    Process sequences from a parquet file to determine SNP site pileup.
-    
+    """Processes a Parquet file to determine SNP site pileup.
+
     Args:
-        parquet_file: Path to the parquet file
-        reference_genome: Dictionary of chromosome sequences
-        batch_size: Number of records to process in each batch
-        num_workers: Number of worker processes for parallel processing
-        n_bp_downstream: Number of base pairs downstream to include in the reference extract
-        n_bp_upstream: Number of base pairs upstream to include in the reference extract
-        
+        parquet_file: Path to the Parquet file.
+        reference_genome: Dictionary of chromosome sequences.
+        snp_trees: Dictionary of SNP interval trees.
+        batch_size: Number of records per batch.
+        num_workers: Number of worker processes.
+        n_bp_downstream: Bases downstream for reference extraction.
+        n_bp_upstream: Bases upstream for reference extraction.
+
     Returns:
-        Pandas DataFrame with SNP site pileup data
+        A DataFrame with SNP site pileup data.
     """
     if num_workers is None:
         num_workers = multiprocessing.cpu_count()
     
-    logger.info(f"Processing parquet file: {parquet_file} with {num_workers} workers")
+    console.log(f"Processing parquet file: {parquet_file} with {num_workers} workers")
     
     pq_file = pq.ParquetFile(parquet_file)
     
     required_columns = ['chr', 'start', 'end', 'seq', 'prob_class_1', 'name', 'insert_size', 'chr_dmr', 'start_dmr', 'end_dmr']
-    schema_cols = pq_file.schema.names
-    missing_columns = [col for col in required_columns if col not in schema_cols]
+    missing_columns = [col for col in required_columns if col not in pq_file.schema.names]
     if missing_columns:
         msg = f"Missing required columns in Parquet file: {', '.join(missing_columns)}"
-        logger.error(msg)
+        console.log(f"[bold red]ERROR:[/bold red] {msg}")
         raise ValueError(msg)
     
     all_results = []
     
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        # Create a partial function with fixed arguments
         batch_processor = partial(
             process_batch, 
             reference_genome=reference_genome, 
@@ -408,88 +383,78 @@ def process_parquet_file(
             n_bp_upstream=n_bp_upstream
         )
         
-        # Create futures for all batches
-        futures = [
+        futures = {
             executor.submit(batch_processor, batch.to_pandas()) 
             for batch in pq_file.iter_batches(batch_size=batch_size)
-        ]
+        }
         
-        logger.info(f"Submitted {len(futures)} batches for processing.")
+        console.log(f"Submitted {len(futures)} batches for processing.")
         
-        # Process results as they complete
-        for future in tqdm(futures, desc="Processing batches"):
-            try:
-                batch_results = future.result()
-                if batch_results:
-                    all_results.extend(batch_results)
-            except Exception as e:
-                logger.error(f"A batch failed to process: {e}", exc_info=True)
+        with Progress() as progress:
+            task = progress.add_task("[cyan]Processing batches...", total=len(futures))
+            for future in as_completed(futures):
+                try:
+                    batch_results = future.result()
+                    if batch_results:
+                        all_results.extend(batch_results)
+                except Exception as e:
+                    console.log(f"[bold red]ERROR:[/bold red] A batch failed to process: {e}", exc_info=True)
+                progress.update(task, advance=1)
 
     if not all_results:
-        logger.warning("No SNP information was extracted. The output file will be empty.")
-        return pd.DataFrame(columns=required_columns + ['pos', 'status'])
+        console.log("[yellow]WARNING:[/yellow] No SNP information was extracted. The output file will be empty.")
+        return pd.DataFrame()
 
-    results_df = pd.DataFrame(all_results)
-    
-    return results_df
+    return pd.DataFrame(all_results)
 
 def snp_pileup(results_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Calculate the pileup for each SNP site using the formula:
-    sum(status * prob_class_1) / sum(prob_class_1) * 100
-    
+    """Calculates pileup data for each SNP site.
+
     Args:
-        results_df: DataFrame containing SNP site pileup data
-        
+        results_df: DataFrame with per-read SNP information.
+
     Returns:
-        DataFrame with SNP site pileup data
+        A DataFrame with aggregated pileup data per SNP.
     """
-    logger.info("Calculating SNP site pileup")
+    console.log("Calculating SNP site pileup")
     
     if results_df.empty:
-        logger.warning("Input for pileup calculation is empty. Returning empty DataFrame.")
+        console.log("[yellow]WARNING:[/yellow] Input for pileup calculation is empty. Returning empty DataFrame.")
         return pd.DataFrame()
     
-    # Group by SNP site location
-    grouped = results_df.groupby(['chr', 'pos'])
-    
-    # Calculate pileup
-    df = results_df
-    df['prob_ref'] = df['prob_class_1'].where(df['status'] == 0, 0.0)
-    df['prob_alt'] = df['prob_class_1'].where(df['status'] == 1, 0.0)
+    df = results_df.copy()
+    df['prob_ref'] = df.apply(lambda row: row['prob_class_1'] if row['status'] == 0 else 0.0, axis=1)
+    df['prob_alt'] = df.apply(lambda row: row['prob_class_1'] if row['status'] == 1 else 0.0, axis=1)
 
     pileup_df = (
         df
         .groupby(['chr','pos'], as_index=False)
         .agg(
-            # first-value pulls out your static columns
-            ref               = ('ref',               'first'),
-            alt               = ('alt',               'first'),
-            af                = ('af',                'first'),
-            # simple counts
-            cfDNA_ref_reads   = ('status',    lambda x: (x==0).sum()),
-            cfDNA_alt_reads   = ('status',    lambda x: (x==1).sum()),
-            current_depth     = ('status',           'size'),
-            # sums of probabilities
-            total_prob        = ('prob_class_1',      'sum'),
-            sum_prob_ref      = ('prob_ref',          'sum'),
-            sum_prob_alt      = ('prob_alt',          'sum'),
+            ref=('ref', 'first'),
+            alt=('alt', 'first'),
+            af=('af', 'first'),
+            cfDNA_ref_reads=('status', lambda x: (x == 0).sum()),
+            cfDNA_alt_reads=('status', lambda x: (x == 1).sum()),
+            current_depth=('status', 'size'),
+            total_prob=('prob_class_1', 'sum'),
+            sum_prob_ref=('prob_ref', 'sum'),
+            sum_prob_alt=('prob_alt', 'sum'),
         )
     )
 
-    # avoid division by zero
     mask = pileup_df['total_prob'] > 0
-    pileup_df.loc[mask, 'fetal_ref_reads_from_model'] = (
-        pileup_df.loc[mask, 'sum_prob_ref'] / pileup_df.loc[mask, 'total_prob']
+    pileup_df['fetal_ref_reads_from_model'] = np.where(
+        mask,
+        pileup_df['sum_prob_ref'] / pileup_df['total_prob'],
+        0
     )
-    pileup_df.loc[~mask, 'fetal_ref_reads_from_model'] = 0
-
-    pileup_df.loc[mask, 'fetal_alt_reads_from_model'] = (
-        pileup_df.loc[mask, 'sum_prob_alt'] / pileup_df.loc[mask, 'total_prob']
+    pileup_df['fetal_alt_reads_from_model'] = np.where(
+        mask,
+        pileup_df['sum_prob_alt'] / pileup_df['total_prob'],
+        0
     )
-    pileup_df.loc[~mask, 'fetal_alt_reads_from_model'] = 0
 
-    pileup_df = pileup_df.drop(columns=['total_prob','sum_prob_ref','sum_prob_alt'])
+    pileup_df.drop(columns=['total_prob','sum_prob_ref','sum_prob_alt'], inplace=True)
 
     pileup_df['fetal_ref_reads_from_model'] = pileup_df['fetal_ref_reads_from_model'].astype(int)
     pileup_df['fetal_alt_reads_from_model'] = pileup_df['fetal_alt_reads_from_model'].astype(int)
@@ -506,16 +471,12 @@ def snp_pileup(results_df: pd.DataFrame) -> pd.DataFrame:
 @click.option('--n-bp-downstream', default=20, show_default=True, type=int, help='Bases downstream to include in the reference extract.')
 @click.option('--n-bp-upstream', default=20, show_default=True, type=int, help='Bases upstream to include in the reference extract.')
 def main(parquet, fasta, snp_list, output, batch_size, num_workers, n_bp_downstream, n_bp_upstream):
-    """
-    Process sequencing data from a Parquet file to calculate SNP pileup at specified sites.
-    """
-    logger.info("Starting SNP pileup analysis pipeline.")
+    """Processes sequencing data from a Parquet file to calculate SNP pileup."""
+    console.log("Starting SNP pileup analysis pipeline.")
     
-    # Read reference genome and build SNP trees
     reference_genome = read_reference_genome(fasta)
     snp_trees = build_snp_trees(Path(snp_list))
     
-    # Process parquet file to get per-read SNP status
     results_df = process_parquet_file(
         parquet, 
         reference_genome, 
@@ -526,23 +487,21 @@ def main(parquet, fasta, snp_list, output, batch_size, num_workers, n_bp_downstr
         n_bp_upstream=n_bp_upstream
     )
     
-    # Optionally, write raw per-read results for debugging
-    raw_output_path = f"{output}_raw_snp_calls.tsv.gz"
-    results_df.to_csv(raw_output_path, index=False, sep='\t', compression='gzip')
-    logger.info(f"Raw per-read results written to: {raw_output_path}")
+    if not results_df.empty:
+        raw_output_path = f"{output}_raw_snp_calls.tsv.gz"
+        results_df.to_csv(raw_output_path, index=False, sep='\t', compression='gzip')
+        console.log(f"Raw per-read results written to: {raw_output_path}")
 
-    # Calculate final pileup from all read data
     pileup_results_df = snp_pileup(results_df)
 
-    # Write detailed pileup results to a TSV file
     if not pileup_results_df.empty:
         tsv_output = f"{output}_pileup.tsv.gz"
         pileup_results_df.to_csv(tsv_output, index=False, sep='\t', compression='gzip')
-        logger.info(f"Pileup results written to: {tsv_output}")
+        console.log(f"Pileup results written to: {tsv_output}")
     else:
-        logger.warning("Final pileup data is empty. No output file was generated.")
+        console.log("[yellow]WARNING:[/yellow] Final pileup data is empty. No output file was generated.")
 
-    logger.info("Analysis complete.")
+    console.log("Analysis complete.")
 
 if __name__ == '__main__':
     main()
