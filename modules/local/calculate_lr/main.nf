@@ -7,7 +7,7 @@ process CALCULATE_LR {
     path(script)
     
     output:
-    tuple val(meta), path("*.tsv.gz"), emit: lr_results
+    tuple val(meta), path("*.tsv"), emit: lr_results
     
     script:
     def args = task.ext.args ?: ''
