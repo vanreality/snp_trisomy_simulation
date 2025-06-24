@@ -223,14 +223,14 @@ def extract_snp_info_from_alignment(
     algined_query_pos = alignment.coordinates[1][0]
 
     # Recover the M bases in the query sequence
-    recovered_query = ""
-    for q_base in aligned_query:
-        if q_base != '-':
-            recovered_query += original_query[algined_query_pos]
-            algined_query_pos += 1
-        else:
-            recovered_query += '-'
-    aligned_query = recovered_query
+    # recovered_query = ""
+    # for q_base in aligned_query:
+    #     if q_base != '-':
+    #         recovered_query += original_query[algined_query_pos]
+    #         algined_query_pos += 1
+    #     else:
+    #         recovered_query += '-'
+    # aligned_query = recovered_query
 
     for snp_interval in snp_sites:
         snp_data = snp_interval.data
@@ -407,58 +407,89 @@ def process_parquet_file(
 
     return pd.DataFrame(all_results)
 
-def snp_pileup(results_df: pd.DataFrame) -> pd.DataFrame:
+def snp_pileup(results_df: pd.DataFrame, mode: str, threshold: float = None) -> pd.DataFrame:
     """Calculates pileup data for each SNP site.
 
     Args:
         results_df: DataFrame with per-read SNP information.
+        mode: The calculation mode, either 'prob_weighted' or 'hard_filter'.
+        threshold: Probability threshold required for 'hard_filter' mode.
 
     Returns:
         A DataFrame with aggregated pileup data per SNP.
+        
+    Raises:
+        ValueError: If an invalid mode is provided.
     """
-    console.log("Calculating SNP site pileup")
+    console.log(f"Calculating SNP site pileup using '{mode}' mode.")
     
     if results_df.empty:
         console.log("[yellow]WARNING:[/yellow] Input for pileup calculation is empty. Returning empty DataFrame.")
         return pd.DataFrame()
     
     df = results_df.copy()
-    df['prob_ref'] = df.apply(lambda row: row['prob_class_1'] if row['status'] == 0 else 0.0, axis=1)
-    df['prob_alt'] = df.apply(lambda row: row['prob_class_1'] if row['status'] == 1 else 0.0, axis=1)
+    
+    if mode == 'prob_weighted':
+        df['prob_ref'] = df.apply(lambda row: row['prob_class_1'] if row['status'] == 0 else 0.0, axis=1)
+        df['prob_alt'] = df.apply(lambda row: row['prob_class_1'] if row['status'] == 1 else 0.0, axis=1)
 
-    pileup_df = (
-        df
-        .groupby(['chr','pos'], as_index=False)
-        .agg(
+        pileup_df = (
+            df
+            .groupby(['chr','pos'], as_index=False)
+            .agg(
+                ref=('ref', 'first'),
+                alt=('alt', 'first'),
+                af=('af', 'first'),
+                cfDNA_ref_reads=('status', lambda x: (x == 0).sum()),
+                cfDNA_alt_reads=('status', lambda x: (x == 1).sum()),
+                current_depth=('status', 'size'),
+                total_prob=('prob_class_1', 'sum'),
+                sum_prob_ref=('prob_ref', 'sum'),
+                sum_prob_alt=('prob_alt', 'sum'),
+            )
+        )
+
+        mask = pileup_df['total_prob'] > 0
+        pileup_df['fetal_ref_reads_from_model'] = np.where(
+            mask,
+            pileup_df['sum_prob_ref'],
+            0
+        )
+        pileup_df['fetal_alt_reads_from_model'] = np.where(
+            mask,
+            pileup_df['sum_prob_alt'],
+            0
+        )
+
+        pileup_df.drop(columns=['total_prob','sum_prob_ref','sum_prob_alt'], inplace=True)
+
+        pileup_df['fetal_ref_reads_from_model'] = pileup_df['fetal_ref_reads_from_model'].astype(int)
+        pileup_df['fetal_alt_reads_from_model'] = pileup_df['fetal_alt_reads_from_model'].astype(int)
+
+    elif mode == 'hard_filter':
+        base_pileup = df.groupby(['chr', 'pos'], as_index=False).agg(
             ref=('ref', 'first'),
             alt=('alt', 'first'),
             af=('af', 'first'),
             cfDNA_ref_reads=('status', lambda x: (x == 0).sum()),
             cfDNA_alt_reads=('status', lambda x: (x == 1).sum()),
-            current_depth=('status', 'size'),
-            total_prob=('prob_class_1', 'sum'),
-            sum_prob_ref=('prob_ref', 'sum'),
-            sum_prob_alt=('prob_alt', 'sum'),
+            current_depth=('status', 'size')
         )
-    )
 
-    mask = pileup_df['total_prob'] > 0
-    pileup_df['fetal_ref_reads_from_model'] = np.where(
-        mask,
-        pileup_df['sum_prob_ref'] / pileup_df['total_prob'],
-        0
-    )
-    pileup_df['fetal_alt_reads_from_model'] = np.where(
-        mask,
-        pileup_df['sum_prob_alt'] / pileup_df['total_prob'],
-        0
-    )
+        fetal_df = df[df['prob_class_1'] > threshold].copy()
 
-    pileup_df.drop(columns=['total_prob','sum_prob_ref','sum_prob_alt'], inplace=True)
+        fetal_counts = fetal_df.groupby(['chr', 'pos']).agg(
+            fetal_ref_reads_from_model=('status', lambda x: (x == 0).sum()),
+            fetal_alt_reads_from_model=('status', lambda x: (x == 1).sum())
+        ).reset_index()
 
-    pileup_df['fetal_ref_reads_from_model'] = pileup_df['fetal_ref_reads_from_model'].astype(int)
-    pileup_df['fetal_alt_reads_from_model'] = pileup_df['fetal_alt_reads_from_model'].astype(int)
-    
+        pileup_df = pd.merge(base_pileup, fetal_counts, on=['chr', 'pos'], how='left')
+        pileup_df['fetal_ref_reads_from_model'] = pileup_df['fetal_ref_reads_from_model'].fillna(0).astype(int)
+        pileup_df['fetal_alt_reads_from_model'] = pileup_df['fetal_alt_reads_from_model'].fillna(0).astype(int)
+
+    else:
+        raise ValueError(f"Invalid mode specified: {mode}")
+        
     return pileup_df
 
 @click.command()
@@ -466,13 +497,19 @@ def snp_pileup(results_df: pd.DataFrame) -> pd.DataFrame:
 @click.option('--fasta', required=True, type=click.Path(exists=True, dir_okay=False, readable=True), help='Path to the reference genome FASTA file.')
 @click.option('--snp-list', required=True, type=click.Path(exists=True, dir_okay=False, readable=True), help='Path to the SNP list file (VCF-like format).')
 @click.option('--output', required=True, type=str, help='Prefix for output files.')
+@click.option('--mode', required=True, type=click.Choice(['hard_filter', 'prob_weighted']), help='Mode for calculating fetal reads.')
+@click.option('--threshold', type=float, help='Probability threshold for hard_filter mode.')
 @click.option('--batch-size', default=100000, show_default=True, type=int, help='Number of records to process in each batch.')
 @click.option('--num-workers', default=None, type=int, help='Number of worker processes. Defaults to number of CPU cores.')
 @click.option('--n-bp-downstream', default=20, show_default=True, type=int, help='Bases downstream to include in the reference extract.')
 @click.option('--n-bp-upstream', default=20, show_default=True, type=int, help='Bases upstream to include in the reference extract.')
-def main(parquet, fasta, snp_list, output, batch_size, num_workers, n_bp_downstream, n_bp_upstream):
+def main(parquet, fasta, snp_list, output, mode, threshold, batch_size, num_workers, n_bp_downstream, n_bp_upstream):
     """Processes sequencing data from a Parquet file to calculate SNP pileup."""
     console.log("Starting SNP pileup analysis pipeline.")
+    
+    if mode == 'hard_filter' and threshold is None:
+        console.log("[bold red]ERROR:[/bold red] --threshold must be set when using --mode hard_filter.")
+        sys.exit(1)
     
     reference_genome = read_reference_genome(fasta)
     snp_trees = build_snp_trees(Path(snp_list))
@@ -492,7 +529,7 @@ def main(parquet, fasta, snp_list, output, batch_size, num_workers, n_bp_downstr
         results_df.to_csv(raw_output_path, index=False, sep='\t', compression='gzip')
         console.log(f"Raw per-read results written to: {raw_output_path}")
 
-    pileup_results_df = snp_pileup(results_df)
+    pileup_results_df = snp_pileup(results_df, mode=mode, threshold=threshold)
 
     if not pileup_results_df.empty:
         tsv_output = f"{output}_pileup.tsv.gz"
