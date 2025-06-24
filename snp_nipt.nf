@@ -63,7 +63,7 @@ workflow {
         EXTRACT_SNP_FROM_PARQUET(
             ch_parquet_samplesheet,
             file(params.fasta),
-            file(params.fai),
+            file(params.fasta_index),
             file(params.snp_list),
             params.filter_mode,
             params.threshold,
