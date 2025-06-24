@@ -79,7 +79,7 @@ workflow {
     CALCULATE_LR(
         ch_pileup_samplesheet,
         params.lr_mode,
-        file("${workflow.projectDir}/bin/calculate_lr.py")
+        file("${workflow.projectDir}/bin/lr_calculator.py")
     )
 }
 
