@@ -327,10 +327,7 @@ def process_batch(
                         **snp,
                         'prob_class_1': row['prob_class_1'],
                         'name': row['name'],
-                        'insert_size': row['insert_size'],
-                        'chr_dmr': row['chr_dmr'],
-                        'start_dmr': row['start_dmr'],
-                        'end_dmr': row['end_dmr']
+                        'insert_size': row['insert_size']
                     })
     
     return results
@@ -365,7 +362,7 @@ def process_parquet_file(
     
     pq_file = pq.ParquetFile(parquet_file)
     
-    required_columns = ['chr', 'start', 'end', 'seq', 'prob_class_1', 'name', 'insert_size', 'chr_dmr', 'start_dmr', 'end_dmr']
+    required_columns = ['chr', 'start', 'end', 'seq', 'prob_class_1', 'name', 'insert_size']
     missing_columns = [col for col in required_columns if col not in pq_file.schema.names]
     if missing_columns:
         msg = f"Missing required columns in Parquet file: {', '.join(missing_columns)}"
