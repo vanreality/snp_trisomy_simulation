@@ -294,7 +294,7 @@ def process_batch(
     results = []
     
     for _, row in batch.iterrows():
-        chr_name = row['chr']
+        chr_name = str(row['chr'])
         chr_name_norm = f'chr{chr_name}' if not chr_name.startswith('chr') else chr_name
 
         if chr_name_norm not in snp_trees:
