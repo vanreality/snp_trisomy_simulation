@@ -2,6 +2,7 @@
 include { SPLIT_PARQUET_BY_SAMPLE } from './modules/local/split_parquet_by_sample/main.nf'
 include { EXTRACT_SNP_FROM_PARQUET } from './modules/local/extract_snp_from_parquet/main.nf'
 include { CALCULATE_LR } from './modules/local/calculate_lr/main.nf'
+include { VCF_TO_PILEUP } from './modules/local/vcf_to_pileup/main.nf'
 
 workflow {
     // 1. Input parquet processing
@@ -58,6 +59,24 @@ workflow {
                 def meta = [id: row.sample]
                 return [meta, file(row.pileup)]
             }
+            .set { ch_pileup_samplesheet }
+    } else if (params.input_vcf_samplesheet) {
+        // Run VCF_TO_PILEUP process to convert VCF to pileup
+        Channel
+            .fromPath(params.input_vcf_samplesheet)
+            .splitCsv(header: true)
+            .map { row -> 
+                def meta = [id: row.sample]
+                return [meta, file(row.vcf)]
+            }
+            .set { ch_vcf_samplesheet }
+
+        VCF_TO_PILEUP(
+            ch_vcf_samplesheet,
+            file(params.potential_snps),
+            file("${workflow.projectDir}/bin/vcf_to_pileup.py")
+        )
+        VCF_TO_PILEUP.out.pileup
             .set { ch_pileup_samplesheet }
     } else {
         EXTRACT_SNP_FROM_PARQUET(
