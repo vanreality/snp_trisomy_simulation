@@ -73,7 +73,7 @@ workflow {
 
         VCF_TO_PILEUP(
             ch_vcf_samplesheet,
-            file(params.potential_snps),
+            file(params.input_potential_snps),
             file("${workflow.projectDir}/bin/vcf_to_pileup.py")
         )
         VCF_TO_PILEUP.out.pileup
