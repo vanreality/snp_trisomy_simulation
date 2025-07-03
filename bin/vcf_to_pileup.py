@@ -235,7 +235,7 @@ def read_vcf(vcf_file: Union[str, Path], potential_snps_df: pd.DataFrame) -> pd.
             progress.update(read_task, description="Merging with potential SNPs...")
             
             # Merge with potential SNPs
-            output_df = pd.merge(potential_snps_df, vcf_df, on=['chr', 'pos'], how='left')
+            output_df = pd.merge(potential_snps_df, vcf_df, on=['chr', 'pos', 'ref', 'alt'], how='left')
             output_df = output_df[['chr', 'pos', 'ref', 'alt', 'af', 'cfDNA_ref_reads', 'cfDNA_alt_reads', 'current_depth']]
             
             # Calculate coverage statistics
