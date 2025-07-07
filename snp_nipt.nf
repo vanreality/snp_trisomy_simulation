@@ -83,7 +83,7 @@ workflow {
             ch_parquet_samplesheet,
             file(params.fasta),
             file(params.fasta_index),
-            file(params.snp_list),
+            file(params.input_potential_snps),
             params.filter_mode,
             params.threshold,
             file("${workflow.projectDir}/bin/extract_snp_from_parquet.py")
