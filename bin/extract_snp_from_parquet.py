@@ -277,7 +277,8 @@ def process_batch(
     reference_genome: dict, 
     snp_trees: dict, 
     n_bp_downstream: int, 
-    n_bp_upstream: int
+    n_bp_upstream: int,
+    seq_column: str
 ) -> list:
     """Processes a batch of sequences from the Parquet file.
 
@@ -287,6 +288,7 @@ def process_batch(
         snp_trees: Dictionary of SNP interval trees.
         n_bp_downstream: Bases downstream for reference extraction.
         n_bp_upstream: Bases upstream for reference extraction.
+        seq_column: Name of the sequence column ('seq' or 'text').
 
     Returns:
         A list of dictionaries with SNP site pileup data.
@@ -314,7 +316,7 @@ def process_batch(
             if not ref_region:
                 continue
             
-            sequence = row['seq']
+            sequence = row[seq_column]
             alignment = local_realign(sequence, ref_region)
             
             if alignment:
@@ -362,7 +364,20 @@ def process_parquet_file(
     
     pq_file = pq.ParquetFile(parquet_file)
     
-    required_columns = ['chr', 'start', 'end', 'seq', 'prob_class_1', 'name', 'insert_size']
+    # Check for sequence column (either 'seq' or 'text')
+    seq_column = None
+    if 'seq' in pq_file.schema.names:
+        seq_column = 'seq'
+    elif 'text' in pq_file.schema.names:
+        seq_column = 'text'
+    else:
+        msg = "Missing sequence column in Parquet file: expected either 'seq' or 'text'"
+        console.log(f"[bold red]ERROR:[/bold red] {msg}")
+        raise ValueError(msg)
+    
+    console.log(f"Using sequence column: '{seq_column}'")
+    
+    required_columns = ['chr', 'start', 'end', 'prob_class_1', 'name', 'insert_size']
     missing_columns = [col for col in required_columns if col not in pq_file.schema.names]
     if missing_columns:
         msg = f"Missing required columns in Parquet file: {', '.join(missing_columns)}"
@@ -377,7 +392,8 @@ def process_parquet_file(
             reference_genome=reference_genome, 
             snp_trees=snp_trees, 
             n_bp_downstream=n_bp_downstream, 
-            n_bp_upstream=n_bp_upstream
+            n_bp_upstream=n_bp_upstream,
+            seq_column=seq_column
         )
         
         futures = {
