@@ -19,7 +19,7 @@ process EXTRACT_SNP_FROM_PARQUET {
     def args = task.ext.args ?: ''
     """
     python3 ${script} \\
-        --input ${input_file} \\
+        --input-file ${input_file} \\
         --fasta ${fasta} \\
         --snp-list ${snp_list_file} \\
         --output ${meta.id} \\

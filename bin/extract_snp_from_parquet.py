@@ -89,10 +89,13 @@ def read_txt_batch(file_path: str, batch_size: int, skip_rows: int = 0) -> pd.Da
             sep='\t',
             skiprows=skip_rows,
             nrows=batch_size,
+            usecols=[1, 2, 3, 4, 6, 8, 10],
+            names=['chr', 'start', 'end', 'text', 'name', 'insert_size', 'prob_class_1'],
             dtype={
                 'chr': str,
                 'start': int,
                 'end': int,
+                'text': str,
                 'prob_class_1': float,
                 'name': str,
                 'insert_size': int
@@ -633,7 +636,7 @@ def snp_pileup(results_df: pd.DataFrame, mode: str, threshold: float = None) -> 
     return pileup_df
 
 @click.command()
-@click.option('--input', required=True, type=click.Path(exists=True, dir_okay=False, readable=True), help='Path to the input file (parquet or txt format).')
+@click.option('--input-file', required=True, type=click.Path(exists=True, dir_okay=False, readable=True), help='Path to the input file (parquet or txt format).')
 @click.option('--fasta', required=True, type=click.Path(exists=True, dir_okay=False, readable=True), help='Path to the reference genome FASTA file.')
 @click.option('--snp-list', required=True, type=click.Path(exists=True, dir_okay=False, readable=True), help='Path to the SNP list file (VCF-like format).')
 @click.option('--output', required=True, type=str, help='Prefix for output files.')
@@ -643,7 +646,7 @@ def snp_pileup(results_df: pd.DataFrame, mode: str, threshold: float = None) -> 
 @click.option('--num-workers', default=None, type=int, help='Number of worker processes. Defaults to number of CPU cores.')
 @click.option('--n-bp-downstream', default=20, show_default=True, type=int, help='Bases downstream to include in the reference extract.')
 @click.option('--n-bp-upstream', default=20, show_default=True, type=int, help='Bases upstream to include in the reference extract.')
-def main(input, fasta, snp_list, output, mode, threshold, batch_size, num_workers, n_bp_downstream, n_bp_upstream):
+def main(input_file, fasta, snp_list, output, mode, threshold, batch_size, num_workers, n_bp_downstream, n_bp_upstream):
     """Processes sequencing data from an input file (parquet or txt) to calculate SNP pileup."""
     console.log("Starting SNP pileup analysis pipeline.")
     
@@ -655,7 +658,7 @@ def main(input, fasta, snp_list, output, mode, threshold, batch_size, num_worker
     snp_trees = build_snp_trees(Path(snp_list))
     
     results_df = process_input_file(
-        input, 
+        input_file, 
         reference_genome, 
         snp_trees,
         batch_size=batch_size, 
