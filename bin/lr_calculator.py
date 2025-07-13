@@ -1032,6 +1032,18 @@ def LR_calculator_with_maternal_reads(
     help='Column name for modeled fetal alternative reads (default: fetal_alt_reads_from_model)'
 )
 @click.option(
+    '--min-raw-depth',
+    type=click.IntRange(0, None),
+    default=0,
+    help='Minimum raw depth filter for cfDNA reads (default: 0)'
+)
+@click.option(
+    '--min-model-depth',
+    type=click.IntRange(0, None),
+    default=0,
+    help='Minimum model depth filter for model filtered reads (default: 0)'
+)
+@click.option(
     '--ncpus',
     type=click.IntRange(1, cpu_count()),
     default=cpu_count(),
@@ -1056,6 +1068,8 @@ def main(
     wbc_alt_col: str,
     model_ref_col: str,
     model_alt_col: str,
+    min_raw_depth: int,
+    min_model_depth: int,
     ncpus: int,
     verbose: bool
 ) -> None:
@@ -1072,6 +1086,10 @@ def main(
     - cfDNA: Standard cell-free DNA analysis
     - cfDNA+WBC: Analysis with maternal white blood cell data
     - cfDNA+model: Analysis with modeled maternal reads
+    
+    Depth filtering options:
+    - min-raw-depth: Filter SNPs by minimum cfDNA read depth
+    - min-model-depth: Filter SNPs by minimum model filtered read depth (cfDNA+model mode only)
     
     Results are saved as TSV files with fetal fraction estimates and likelihood ratios.
     
@@ -1098,6 +1116,11 @@ def main(
         elif mode == 'cfDNA+model':
             column_info = f"cfDNA columns: {cfdna_ref_col}, {cfdna_alt_col}\nModel columns: {model_ref_col}, {model_alt_col}"
         
+        # Build depth filter info
+        depth_filter_info = f"Raw depth filter: ≥{min_raw_depth}"
+        if mode == 'cfDNA+model':
+            depth_filter_info += f"\nModel depth filter: ≥{min_model_depth}"
+        
         # Display startup information
         console.print(Panel.fit(
             f"[bold green]Fetal Fraction & Likelihood Ratio Calculator[/bold green]\n"
@@ -1107,6 +1130,7 @@ def main(
             f"{column_info}\n"
             f"Chromosomes: {', '.join(map(str, target_chromosomes))}\n"
             f"FF Range: {ff_min:.3f} - {ff_max:.3f} (step: {ff_step:.3f})\n"
+            f"{depth_filter_info}\n"
             f"CPU Cores: {ncpus}",
             title="Configuration"
         ))
@@ -1125,7 +1149,9 @@ def main(
             wbc_ref_col=wbc_ref_col,
             wbc_alt_col=wbc_alt_col,
             model_ref_col=model_ref_col,
-            model_alt_col=model_alt_col
+            model_alt_col=model_alt_col,
+            min_raw_depth=min_raw_depth,
+            min_model_depth=min_model_depth
         )
         
         console.print(f"[green]✓ Loaded {len(df)} SNPs from {df['chr'].nunique()} chromosomes[/green]")
@@ -1305,13 +1331,15 @@ def load_and_validate_data(
     wbc_ref_col: str = 'maternal_ref_reads',
     wbc_alt_col: str = 'maternal_alt_reads',
     model_ref_col: str = 'maternal_ref_reads_from_model',
-    model_alt_col: str = 'maternal_alt_reads_from_model'
+    model_alt_col: str = 'maternal_alt_reads_from_model',
+    min_raw_depth: int = 0,
+    min_model_depth: int = 0
 ) -> pd.DataFrame:
     """
     Load and validate input SNP data from TSV.GZ file.
     
     This function validates the presence of required columns based on the analysis mode
-    and performs data type validation and cleaning.
+    and performs data type validation and cleaning. It also applies depth filters.
     
     Args:
         input_path (Path): Path to input file
@@ -1322,6 +1350,8 @@ def load_and_validate_data(
         wbc_alt_col (str): Column name for maternal WBC alternative reads
         model_ref_col (str): Column name for modeled maternal reference reads
         model_alt_col (str): Column name for modeled maternal alternative reads
+        min_raw_depth (int): Minimum depth for cfDNA reads (default: 0)
+        min_model_depth (int): Minimum depth for modeled reads (default: 0)
     
     Returns:
         pd.DataFrame: Validated pandas DataFrame with proper data types
@@ -1391,6 +1421,36 @@ def load_and_validate_data(
     
     if len(df) == 0:
         raise ValueError("No valid data remaining after filtering")
+    
+    # Apply depth filters
+    initial_count = len(df)
+    
+    # Filter by minimum raw depth (cfDNA reads)
+    if min_raw_depth > 0:
+        df['cfdna_total_depth'] = df[cfdna_ref_col] + df[cfdna_alt_col]
+        df = df[df['cfdna_total_depth'] >= min_raw_depth]
+        remaining_count = len(df)
+        percentage = (remaining_count / initial_count) * 100 if initial_count > 0 else 0
+        console.print(f"[cyan]Raw depth filter (≥{min_raw_depth}): {remaining_count:,} SNPs remaining ({percentage:.1f}%)[/cyan]")
+        df = df.drop(columns=['cfdna_total_depth']).reset_index(drop=True)
+        
+        if len(df) == 0:
+            raise ValueError("No SNPs remaining after raw depth filtering")
+    
+    # Filter by minimum model depth (only for cfDNA+model mode)
+    if min_model_depth > 0 and mode == 'cfDNA+model':
+        current_count = len(df)
+        df['model_total_depth'] = df[model_ref_col] + df[model_alt_col]
+        df = df[df['model_total_depth'] >= min_model_depth]
+        remaining_count = len(df)
+        percentage = (remaining_count / current_count) * 100 if current_count > 0 else 0
+        console.print(f"[cyan]Model depth filter (≥{min_model_depth}): {remaining_count:,} SNPs remaining ({percentage:.1f}%)[/cyan]")
+        df = df.drop(columns=['model_total_depth']).reset_index(drop=True)
+        
+        if len(df) == 0:
+            raise ValueError("No SNPs remaining after model depth filtering")
+    elif min_model_depth > 0 and mode != 'cfDNA+model':
+        console.print(f"[yellow]Warning: Model depth filter ignored for mode '{mode}' (only applies to 'cfDNA+model')[/yellow]")
     
     return df
 

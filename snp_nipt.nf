@@ -24,6 +24,21 @@ workflow {
                 return [meta, parquetFile]
             }
             .set { ch_parquet_samplesheet }
+    } else if (params.input_txt_samplesheet) {
+        // Skip SPLIT_PARQUET_BY_SAMPLE process and directly parse the provided CSV
+        Channel
+            .fromPath(params.input_txt_samplesheet)
+            .splitCsv(header: true)
+            .map { row -> 
+                def meta = [id: row.sample]
+                // Check if txt file exists
+                def txtFile = file(row.txt)
+                if (!txtFile.exists()) {
+                    error "txt file not found: ${row.txt}"
+                }
+                return [meta, txtFile]
+            }
+            .set { ch_parquet_samplesheet }
     } else if (params.input_parquet) {
         // Run split_parquet_by_sample process to split input parquet file by sample
         SPLIT_PARQUET_BY_SAMPLE(
@@ -98,6 +113,8 @@ workflow {
     CALCULATE_LR(
         ch_pileup_samplesheet,
         params.lr_mode,
+        params.min_raw_depth,
+        params.min_model_depth,
         file("${workflow.projectDir}/bin/lr_calculator.py")
     )
 }
