@@ -16,6 +16,119 @@ from rich.progress import Progress
 
 console = Console()
 
+def detect_file_format(file_path: str) -> str:
+    """Detects the file format based on file extension.
+    
+    Args:
+        file_path: Path to the input file.
+        
+    Returns:
+        The detected file format ('parquet' or 'txt').
+    """
+    file_extension = Path(file_path).suffix.lower()
+    if file_extension in ['.parquet', '.pq']:
+        return 'parquet'
+    elif file_extension in ['.txt', '.tsv', '.csv']:
+        return 'txt'
+    else:
+        # Default to txt for unknown extensions
+        console.log(f"[yellow]WARNING:[/yellow] Unknown file extension '{file_extension}', assuming txt format.")
+        return 'txt'
+
+def get_file_info(file_path: str, file_format: str) -> dict:
+    """Gets file information including available columns and total rows.
+    
+    Args:
+        file_path: Path to the input file.
+        file_format: The file format ('parquet' or 'txt').
+        
+    Returns:
+        A dictionary containing file information.
+    """
+    if file_format == 'parquet':
+        pq_file = pq.ParquetFile(file_path)
+        return {
+            'columns': pq_file.schema.names,
+            'total_rows': pq_file.metadata.num_rows,
+            'num_row_groups': pq_file.num_row_groups
+        }
+    else:  # txt format
+        # Read first few lines to determine columns
+        with open(file_path, 'r') as f:
+            first_line = f.readline().strip()
+            if first_line.startswith('#'):
+                # Skip header lines starting with #
+                while first_line.startswith('#'):
+                    first_line = f.readline().strip()
+            
+            columns = first_line.split('\t')
+            
+            # Count total lines (approximate for txt files)
+            total_rows = sum(1 for _ in open(file_path, 'r')) - 1  # Subtract header
+            
+        return {
+            'columns': columns,
+            'total_rows': total_rows,
+            'num_row_groups': 1  # Single "group" for txt
+        }
+
+def read_txt_batch(file_path: str, batch_size: int, skip_rows: int = 0) -> pd.DataFrame:
+    """Reads a batch of data from a txt file.
+    
+    Args:
+        file_path: Path to the txt file.
+        batch_size: Number of rows to read.
+        skip_rows: Number of rows to skip from the beginning.
+        
+    Returns:
+        A DataFrame with the batch data.
+    """
+    try:
+        df = pd.read_csv(
+            file_path,
+            sep='\t',
+            skiprows=skip_rows,
+            nrows=batch_size,
+            dtype={
+                'chr': str,
+                'start': int,
+                'end': int,
+                'prob_class_1': float,
+                'name': str,
+                'insert_size': int
+            }
+        )
+        return df
+    except Exception as e:
+        console.log(f"[bold red]ERROR:[/bold red] Failed to read txt batch: {e}")
+        return pd.DataFrame()
+
+def process_txt_file_in_batches(file_path: str, batch_size: int):
+    """Generator that yields batches from a txt file.
+    
+    Args:
+        file_path: Path to the txt file.
+        batch_size: Size of each batch.
+        
+    Yields:
+        DataFrame batches.
+    """
+    file_info = get_file_info(file_path, 'txt')
+    total_rows = file_info['total_rows']
+    
+    skip_rows = 1  # Skip header
+    rows_read = 0
+    
+    while rows_read < total_rows:
+        batch_df = read_txt_batch(file_path, batch_size, skip_rows)
+        if batch_df.empty:
+            break
+            
+        yield batch_df
+        
+        rows_read += len(batch_df)
+        skip_rows += len(batch_df)
+
 def read_reference_genome(fasta_file: str) -> dict:
     """Reads the reference genome from a FASTA file.
 
@@ -334,8 +447,8 @@ def process_batch(
     
     return results
 
-def process_parquet_file(
-    parquet_file: str, 
+def process_input_file(
+    input_file: str, 
     reference_genome: dict, 
     snp_trees: dict, 
     batch_size: int = 1000, 
@@ -343,10 +456,10 @@ def process_parquet_file(
     n_bp_downstream: int = 20, 
     n_bp_upstream: int = 20
 ) -> pd.DataFrame:
-    """Processes a Parquet file to determine SNP site pileup.
+    """Processes an input file (parquet or txt) to determine SNP site pileup.
 
     Args:
-        parquet_file: Path to the Parquet file.
+        input_file: Path to the input file (parquet or txt).
         reference_genome: Dictionary of chromosome sequences.
         snp_trees: Dictionary of SNP interval trees.
         batch_size: Number of records per batch.
@@ -360,27 +473,31 @@ def process_parquet_file(
     if num_workers is None:
         num_workers = multiprocessing.cpu_count()
     
-    console.log(f"Processing parquet file: {parquet_file} with {num_workers} workers")
+    # Detect file format
+    file_format = detect_file_format(input_file)
+    console.log(f"Detected file format: {file_format}")
+    console.log(f"Processing input file: {input_file} with {num_workers} workers")
     
-    pq_file = pq.ParquetFile(parquet_file)
+    # Get file information
+    file_info = get_file_info(input_file, file_format)
     
     # Check for sequence column (either 'seq' or 'text')
     seq_column = None
-    if 'seq' in pq_file.schema.names:
+    if 'seq' in file_info['columns']:
         seq_column = 'seq'
-    elif 'text' in pq_file.schema.names:
+    elif 'text' in file_info['columns']:
         seq_column = 'text'
     else:
-        msg = "Missing sequence column in Parquet file: expected either 'seq' or 'text'"
+        msg = "Missing sequence column in input file: expected either 'seq' or 'text'"
         console.log(f"[bold red]ERROR:[/bold red] {msg}")
         raise ValueError(msg)
     
     console.log(f"Using sequence column: '{seq_column}'")
     
     required_columns = ['chr', 'start', 'end', 'prob_class_1', 'name', 'insert_size']
-    missing_columns = [col for col in required_columns if col not in pq_file.schema.names]
+    missing_columns = [col for col in required_columns if col not in file_info['columns']]
     if missing_columns:
-        msg = f"Missing required columns in Parquet file: {', '.join(missing_columns)}"
+        msg = f"Missing required columns in input file: {', '.join(missing_columns)}"
         console.log(f"[bold red]ERROR:[/bold red] {msg}")
         raise ValueError(msg)
     
@@ -396,12 +513,22 @@ def process_parquet_file(
             seq_column=seq_column
         )
         
-        futures = {
-            executor.submit(batch_processor, batch.to_pandas()) 
-            for batch in pq_file.iter_batches(batch_size=batch_size)
-        }
+        # Create batches based on file format
+        if file_format == 'parquet':
+            pq_file = pq.ParquetFile(input_file)
+            batch_generator = (batch.to_pandas() for batch in pq_file.iter_batches(batch_size=batch_size))
+        else:  # txt format
+            batch_generator = process_txt_file_in_batches(input_file, batch_size)
         
-        console.log(f"Submitted {len(futures)} batches for processing.")
+        # Submit all batches for processing
+        futures = []
+        batch_count = 0
+        for batch in batch_generator:
+            future = executor.submit(batch_processor, batch)
+            futures.append(future)
+            batch_count += 1
+        
+        console.log(f"Submitted {batch_count} batches for processing.")
         
         with Progress() as progress:
             task = progress.add_task("[cyan]Processing batches...", total=len(futures))
@@ -506,7 +633,7 @@ def snp_pileup(results_df: pd.DataFrame, mode: str, threshold: float = None) -> 
     return pileup_df
 
 @click.command()
-@click.option('--parquet', required=True, type=click.Path(exists=True, dir_okay=False, readable=True), help='Path to the input parquet file.')
+@click.option('--input', required=True, type=click.Path(exists=True, dir_okay=False, readable=True), help='Path to the input file (parquet or txt format).')
 @click.option('--fasta', required=True, type=click.Path(exists=True, dir_okay=False, readable=True), help='Path to the reference genome FASTA file.')
 @click.option('--snp-list', required=True, type=click.Path(exists=True, dir_okay=False, readable=True), help='Path to the SNP list file (VCF-like format).')
 @click.option('--output', required=True, type=str, help='Prefix for output files.')
@@ -516,8 +643,8 @@ def snp_pileup(results_df: pd.DataFrame, mode: str, threshold: float = None) -> 
 @click.option('--num-workers', default=None, type=int, help='Number of worker processes. Defaults to number of CPU cores.')
 @click.option('--n-bp-downstream', default=20, show_default=True, type=int, help='Bases downstream to include in the reference extract.')
 @click.option('--n-bp-upstream', default=20, show_default=True, type=int, help='Bases upstream to include in the reference extract.')
-def main(parquet, fasta, snp_list, output, mode, threshold, batch_size, num_workers, n_bp_downstream, n_bp_upstream):
-    """Processes sequencing data from a Parquet file to calculate SNP pileup."""
+def main(input, fasta, snp_list, output, mode, threshold, batch_size, num_workers, n_bp_downstream, n_bp_upstream):
+    """Processes sequencing data from an input file (parquet or txt) to calculate SNP pileup."""
     console.log("Starting SNP pileup analysis pipeline.")
     
     if mode == 'hard_filter' and threshold is None:
@@ -527,8 +654,8 @@ def main(parquet, fasta, snp_list, output, mode, threshold, batch_size, num_work
     reference_genome = read_reference_genome(fasta)
     snp_trees = build_snp_trees(Path(snp_list))
     
-    results_df = process_parquet_file(
-        parquet, 
+    results_df = process_input_file(
+        input, 
         reference_genome, 
         snp_trees,
         batch_size=batch_size, 

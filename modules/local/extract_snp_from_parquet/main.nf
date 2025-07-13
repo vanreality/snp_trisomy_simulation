@@ -2,7 +2,7 @@ process EXTRACT_SNP_FROM_PARQUET {
     tag "$meta.id"
     
     input:
-    tuple val(meta), path(parquet_file)
+    tuple val(meta), path(input_file)
     path(fasta)
     path(fai)
     path(snp_list_file)
@@ -13,18 +13,20 @@ process EXTRACT_SNP_FROM_PARQUET {
     output:
     tuple val(meta), path("*_raw_snp_calls.tsv.gz"), emit: raw_snp_calls
     tuple val(meta), path("*_pileup.tsv.gz"), emit: pileup
+    tuple val(meta), path("${meta.id}.log"), emit: log_file
     
     script:
     def args = task.ext.args ?: ''
     """
     python3 ${script} \\
-        --parquet ${parquet_file} \\
+        --input ${input_file} \\
         --fasta ${fasta} \\
         --snp-list ${snp_list_file} \\
         --output ${meta.id} \\
         --mode ${filter_mode} \\
         --threshold ${threshold} \\
         --num-workers ${task.cpus} \\
-        ${args}
+        ${args} \\
+        > ${meta.id}.log 2>&1
     """
 }
