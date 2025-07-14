@@ -3,6 +3,7 @@ include { SPLIT_PARQUET_BY_SAMPLE } from './modules/local/split_parquet_by_sampl
 include { EXTRACT_SNP_FROM_PARQUET } from './modules/local/extract_snp_from_parquet/main.nf'
 include { CALCULATE_LR } from './modules/local/calculate_lr/main.nf'
 include { VCF_TO_PILEUP } from './modules/local/vcf_to_pileup/main.nf'
+include { MERGE_LR_OUTPUT } from './modules/local/merge_lr_output/main.nf'
 
 workflow {
     // 1. Input parquet processing
@@ -116,6 +117,14 @@ workflow {
         params.min_raw_depth,
         params.min_model_depth,
         file("${workflow.projectDir}/bin/lr_calculator.py")
+    )
+
+    // 4. Merge LR output
+    // ====================================
+
+    MERGE_LR_OUTPUT(
+        CALCULATE_LR.out.lr_results,
+        file("${workflow.projectDir}/bin/merge_lr_output.py")
     )
 }
 

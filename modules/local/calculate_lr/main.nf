@@ -9,8 +9,8 @@ process CALCULATE_LR {
     path(script)
     
     output:
-    tuple val(meta), path("*.tsv"), emit: lr_results
-    tuple val(meta), path("${meta.id}.log"), emit: log_file
+    path("*.tsv"), emit: lr_results
+    path("${meta.id}.log"), emit: log_file
     
     script:
     def args = task.ext.args ?: ''
