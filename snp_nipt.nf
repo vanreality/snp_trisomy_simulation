@@ -123,7 +123,7 @@ workflow {
     // ====================================
 
     MERGE_LR_OUTPUT(
-        CALCULATE_LR.out.lr_results,
+        CALCULATE_LR.out.lr_results.collect(),
         file("${workflow.projectDir}/bin/merge_lr_output.py")
     )
 }
