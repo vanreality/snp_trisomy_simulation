@@ -98,7 +98,7 @@ def merge_lr_files(input_files: List[Path]) -> pd.DataFrame:
         input_files (List[Path]): List of paths to lr_calculator output files
     
     Returns:
-        pd.DataFrame: Merged DataFrame with columns ['chr', 'lr', 'ff', 'sample']
+        pd.DataFrame: Merged DataFrame with columns ['chr', 'log_lr', 'ff', 'sample']
     
     Raises:
         ValueError: If no valid files are provided or processing fails
@@ -177,7 +177,7 @@ def validate_merged_data(df: pd.DataFrame) -> None:
         ValueError: If validation fails
     """
     # Check for required columns
-    required_cols = {'chr', 'lr', 'ff', 'sample'}
+    required_cols = {'chr', 'log_lr', 'ff', 'sample'}
     if not required_cols.issubset(df.columns):
         missing = required_cols - set(df.columns)
         raise ValueError(f"Missing required columns in merged data: {missing}")
