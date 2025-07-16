@@ -1050,6 +1050,12 @@ def LR_calculator_with_maternal_reads(
     help=f'Number of CPU cores to use for parallel processing (default: {cpu_count()})'
 )
 @click.option(
+    '--fast',
+    is_flag=True,
+    default=False,
+    help='Fast mode: estimate fetal fraction once using all chromosomes instead of per-chromosome estimation (default: False)'
+)
+@click.option(
     '--verbose', '-v',
     is_flag=True,
     help='Enable verbose output'
@@ -1071,6 +1077,7 @@ def main(
     min_raw_depth: int,
     min_model_depth: int,
     ncpus: int,
+    fast: bool,
     verbose: bool
 ) -> None:
     """
@@ -1086,6 +1093,10 @@ def main(
     - cfDNA: Standard cell-free DNA analysis
     - cfDNA+WBC: Analysis with maternal white blood cell data
     - cfDNA+model: Analysis with modeled maternal reads
+    
+    Analysis speed options:
+    - Standard mode: Estimates fetal fraction per chromosome using background chromosomes
+    - Fast mode (--fast): Estimates fetal fraction once using all chromosomes for faster processing
     
     Depth filtering options:
     - min-raw-depth: Filter SNPs by minimum cfDNA read depth
@@ -1121,6 +1132,13 @@ def main(
         if mode == 'cfDNA+model':
             depth_filter_info += f"\nModel depth filter: ≥{min_model_depth}"
         
+        # Build analysis mode info
+        analysis_mode_info = f"Analysis mode: {'Fast' if fast else 'Standard'}"
+        if fast:
+            analysis_mode_info += " (single FF estimation using all chromosomes)"
+        else:
+            analysis_mode_info += " (per-chromosome FF estimation using background chromosomes)"
+        
         # Display startup information
         console.print(Panel.fit(
             f"[bold green]Fetal Fraction & Likelihood Ratio Calculator[/bold green]\n"
@@ -1130,6 +1148,7 @@ def main(
             f"{column_info}\n"
             f"Chromosomes: {', '.join(map(str, target_chromosomes))}\n"
             f"FF Range: {ff_min:.3f} - {ff_max:.3f} (step: {ff_step:.3f})\n"
+            f"{analysis_mode_info}\n"
             f"{depth_filter_info}\n"
             f"CPU Cores: {ncpus}",
             title="Configuration"
@@ -1159,6 +1178,56 @@ def main(
         # Initialize results storage
         results_list = []
         
+        # Fast mode: Estimate fetal fraction once using all chromosomes
+        global_fetal_fraction = None
+        if fast:
+            console.print(f"\n[bold yellow]Fast Mode: Estimating fetal fraction using all {len(df)} SNPs...[/bold yellow]")
+            
+            try:
+                if mode == 'cfDNA':
+                    global_fetal_fraction, _ = estimate_fetal_fraction(
+                        df,  # Use all data instead of background only
+                        f_min=ff_min,
+                        f_max=ff_max,
+                        f_step=ff_step,
+                        ncpus=ncpus,
+                        ref_col=cfdna_ref_col,
+                        alt_col=cfdna_alt_col
+                    )
+                elif mode == 'cfDNA+WBC':
+                    global_fetal_fraction, _ = estimate_fetal_fraction_with_maternal_reads(
+                        df,  # Use all data instead of background only
+                        f_min=ff_min,
+                        f_max=ff_max,
+                        f_step=ff_step,
+                        ncpus=ncpus,
+                        ref_col=cfdna_ref_col,
+                        alt_col=cfdna_alt_col,
+                        maternal_ref_col=wbc_ref_col,
+                        maternal_alt_col=wbc_alt_col
+                    )
+                elif mode == 'cfDNA+model':
+                    global_fetal_fraction, _ = estimate_fetal_fraction(
+                        df,  # Use all data instead of background only
+                        f_min=ff_min,
+                        f_max=ff_max,
+                        f_step=ff_step,
+                        ncpus=ncpus,
+                        ref_col=model_ref_col,
+                        alt_col=model_alt_col
+                    )
+                
+                console.print(f"[bold green]✓ Global fetal fraction estimated: {global_fetal_fraction:.3f}[/bold green]")
+                console.print("[cyan]This fetal fraction will be used for all chromosome analyses[/cyan]")
+                
+            except Exception as e:
+                console.print(f"[red]✗ Failed to estimate global fetal fraction: {str(e)}[/red]")
+                if verbose:
+                    console.print_exception()
+                console.print("[yellow]Falling back to standard per-chromosome estimation[/yellow]")
+                fast = False  # Disable fast mode if global FF estimation fails
+                global_fetal_fraction = None
+        
         # Process each target chromosome
         for target_chr in target_chromosomes:
             chr_name = f"chr{target_chr}"
@@ -1179,50 +1248,55 @@ def main(
             console.print(f"Target SNPs: {len(target_data)}, Background SNPs: {len(background_data)}")
             
             try:
-                # Estimate fetal fraction using background chromosomes
-                console.print(f"[cyan]Estimating fetal fraction for {chr_name}...[/cyan]")
+                # Determine fetal fraction to use
+                if fast and global_fetal_fraction is not None:
+                    # Fast mode: Use pre-computed global fetal fraction
+                    est_ff = global_fetal_fraction
+                    console.print(f"[cyan]Using global fetal fraction ({est_ff:.3f}) for {chr_name}...[/cyan]")
+                else:
+                    # Standard mode: Estimate fetal fraction using background chromosomes
+                    console.print(f"[cyan]Estimating fetal fraction for {chr_name}...[/cyan]")
+                    if mode == 'cfDNA':
+                        est_ff, _ = estimate_fetal_fraction(
+                            background_data,
+                            f_min=ff_min,
+                            f_max=ff_max,
+                            f_step=ff_step,
+                            ncpus=ncpus,
+                            ref_col=cfdna_ref_col,
+                            alt_col=cfdna_alt_col
+                        )
+                    elif mode == 'cfDNA+WBC':
+                        est_ff, _ = estimate_fetal_fraction_with_maternal_reads(
+                            background_data,
+                            f_min=ff_min,
+                            f_max=ff_max,
+                            f_step=ff_step,
+                            ncpus=ncpus,
+                            ref_col=cfdna_ref_col,
+                            alt_col=cfdna_alt_col,
+                            maternal_ref_col=wbc_ref_col,
+                            maternal_alt_col=wbc_alt_col
+                        )
+                    elif mode == 'cfDNA+model':
+                        est_ff, _ = estimate_fetal_fraction(
+                            background_data,
+                            f_min=ff_min,
+                            f_max=ff_max,
+                            f_step=ff_step,
+                            ncpus=ncpus,
+                            ref_col=model_ref_col,
+                            alt_col=model_alt_col
+                        )
+                
+                # Calculate likelihood ratio for target chromosome
+                console.print(f"[cyan]Calculating likelihood ratio for {chr_name}...[/cyan]")
                 if mode == 'cfDNA':
-                    est_ff, _ = estimate_fetal_fraction(
-                        background_data,
-                        f_min=ff_min,
-                        f_max=ff_max,
-                        f_step=ff_step,
-                        ncpus=ncpus,
-                        ref_col=cfdna_ref_col,
-                        alt_col=cfdna_alt_col
-                    )
-                    
-                    # Calculate likelihood ratio for target chromosome
-                    console.print(f"[cyan]Calculating likelihood ratio for {chr_name}...[/cyan]")
                     lr = LR_calculator(target_data, 
                                        est_ff, 
                                        ref_col=cfdna_ref_col, 
                                        alt_col=cfdna_alt_col)
-                    
-                    # Store results
-                    results_list.append({
-                        'Chrom': chr_name,
-                        'LR': lr,
-                        'Fetal Fraction': est_ff
-                    })
-                    
-                    console.print(f"[green]✓ {chr_name}: FF = {est_ff:.3f}, LR = {lr:.2e}[/green]")
-
                 elif mode == 'cfDNA+WBC':
-                    est_ff, _ = estimate_fetal_fraction_with_maternal_reads(
-                        background_data,
-                        f_min=ff_min,
-                        f_max=ff_max,
-                        f_step=ff_step,
-                        ncpus=ncpus,
-                        ref_col=cfdna_ref_col,
-                        alt_col=cfdna_alt_col,
-                        maternal_ref_col=wbc_ref_col,
-                        maternal_alt_col=wbc_alt_col
-                    )
-
-                    # Calculate likelihood ratio for target chromosome
-                    console.print(f"[cyan]Calculating likelihood ratio for {chr_name}...[/cyan]")
                     lr = LR_calculator_with_maternal_reads(
                         target_data, 
                         est_ff, 
@@ -1231,43 +1305,22 @@ def main(
                         maternal_ref_col=wbc_ref_col, 
                         maternal_alt_col=wbc_alt_col
                     )
-                    # Store results
-                    results_list.append({
-                        'Chrom': chr_name,
-                        'LR': lr,
-                        'Fetal Fraction': est_ff
-                    })
-                    
-                    console.print(f"[green]✓ {chr_name}: FF = {est_ff:.3f}, LR = {lr:.2e}[/green]")
-
                 elif mode == 'cfDNA+model':
-                    est_ff, _ = estimate_fetal_fraction(
-                        background_data,
-                        f_min=ff_min,
-                        f_max=ff_max,
-                        f_step=ff_step,
-                        ncpus=ncpus,
-                        ref_col=model_ref_col,
-                        alt_col=model_alt_col
-                    )
-
-                    # Calculate likelihood ratio for target chromosome
-                    console.print(f"[cyan]Calculating likelihood ratio for {chr_name}...[/cyan]")
                     lr = LR_calculator(
                         target_data, 
                         est_ff, 
                         ref_col=model_ref_col, 
                         alt_col=model_alt_col
                     )
-                    
-                    # Store results
-                    results_list.append({
-                        'Chrom': chr_name,
-                        'LR': lr,
-                        'Fetal Fraction': est_ff
-                    })
-                    
-                    console.print(f"[green]✓ {chr_name}: FF = {est_ff:.3f}, LR = {lr:.2e}[/green]")
+                
+                # Store results
+                results_list.append({
+                    'Chrom': chr_name,
+                    'LR': lr,
+                    'Fetal Fraction': est_ff
+                })
+                
+                console.print(f"[green]✓ {chr_name}: FF = {est_ff:.3f}, LR = {lr:.2e}[/green]")
 
             except Exception as e:
                 console.print(f"[red]✗ Error processing {chr_name}: {str(e)}[/red]")
