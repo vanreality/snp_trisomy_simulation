@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Fetal Fraction Estimation and Likelihood Ratio Calculator for Aneuploidy Detection
+Fetal Fraction Estimation and Log Likelihood Ratio Calculator for Aneuploidy Detection
 
 This script analyzes cell-free DNA (cfDNA) sequencing data to:
 1. Estimate fetal fraction from maternal plasma samples
-2. Calculate likelihood ratios for trisomy vs. disomy detection
+2. Calculate log likelihood ratios for trisomy vs. disomy detection
 
 The analysis uses SNP read counts and population allele frequencies to perform
 statistical inference on fetal chromosomal abnormalities.
@@ -322,13 +322,13 @@ def LR_calculator(
     alt_col: str = 'cfDNA_alt_reads'
 ) -> float:
     """
-    Calculate the likelihood ratio (LR) of trisomy vs. disomy for a target chromosome.
+    Calculate the log likelihood ratio (log LR) of trisomy vs. disomy for a target chromosome.
     
     This function implements a comprehensive statistical model that:
     1. Considers all possible maternal and paternal genotype combinations
     2. Models fetal genotype distributions under both disomy and trisomy hypotheses
     3. Accounts for mixture effects due to fetal fraction in maternal plasma
-    4. Computes likelihood ratio as L_trisomy / L_disomy
+    4. Computes log likelihood ratio as log(L_trisomy) - log(L_disomy)
     
     Args:
         input_df (pd.DataFrame): DataFrame with target chromosome SNP data containing:
@@ -342,8 +342,8 @@ def LR_calculator(
         alt_col (str, optional): Column name for alternative reads. Defaults to 'cfDNA_alt_reads'.
     
     Returns:
-        float: Likelihood ratio LR = L_trisomy / L_disomy. 
-               Returns np.inf if L_disomy = 0, and 0.0 if L_trisomy = 0.
+        float: Log likelihood ratio (log LR) = log(L_trisomy) - log(L_disomy).
+               Positive values indicate evidence for trisomy, negative values indicate evidence for disomy.
     
     Raises:
         ValueError: If input DataFrame is missing required columns
@@ -495,7 +495,7 @@ def LR_calculator(
     logL_trisomy = 0.0
     genotype_labels = ['0/0', '0/1', '1/1']
     
-    console.print(f"[green]Calculating likelihood ratio for {len(df_clean)} SNPs[/green]")
+    console.print(f"[green]Calculating log likelihood ratio for {len(df_clean)} SNPs[/green]")
     
     # Process each SNP with progress tracking
     with Progress(
@@ -505,7 +505,7 @@ def LR_calculator(
         TimeElapsedColumn(),
         console=console
     ) as progress:
-        task = progress.add_task("Computing likelihood ratios...", total=len(df_clean))
+        task = progress.add_task("Computing log likelihood ratios...", total=len(df_clean))
         
         for idx, snp in df_clean.iterrows():
             # Extract observed data
@@ -581,16 +581,11 @@ def LR_calculator(
             
             progress.advance(task)
     
-    # Compute final likelihood ratio
+    # Compute final log likelihood ratio
     delta_logL = logL_trisomy - logL_disomy
     
-    # Handle numerical overflow/underflow
-    if delta_logL > 700:
-        return float('inf')
-    elif delta_logL < -700:
-        return 0.0
-    else:
-        return math.exp(delta_logL)
+    # Return log likelihood ratio directly (no need for overflow handling since we're not exponentiating)
+    return delta_logL
 
 
 def estimate_fetal_fraction_with_maternal_reads(
@@ -749,7 +744,7 @@ def LR_calculator_with_maternal_reads(
     maternal_alt_col: str = 'maternal_alt_reads'
 ) -> float:
     """
-    Calculate the likelihood ratio (LR) of trisomy vs. disomy for a target chromosome,
+    Calculate the log likelihood ratio (log LR) of trisomy vs. disomy for a target chromosome,
     incorporating maternal WBC genotype information.
 
     This function first determines the most likely maternal genotype at each SNP using
@@ -768,8 +763,8 @@ def LR_calculator_with_maternal_reads(
         maternal_alt_col (str, optional): Column for maternal WBC alternative reads.
 
     Returns:
-        float: The likelihood ratio LR = L_trisomy / L_disomy. Returns np.inf if
-               the disomy likelihood is zero, and 0.0 if the trisomy likelihood is zero.
+        float: The log likelihood ratio (log LR) = log(L_trisomy) - log(L_disomy).
+               Positive values indicate evidence for trisomy, negative values indicate evidence for disomy.
 
     Raises:
         ValueError: If input data is invalid, fetal fraction is out of range,
@@ -881,7 +876,7 @@ def LR_calculator_with_maternal_reads(
     logL_disomy = 0.0
     logL_trisomy = 0.0
     
-    console.print(f"[green]Calculating likelihood ratio for {len(df_clean)} SNPs with maternal genotypes[/green]")
+    console.print(f"[green]Calculating log likelihood ratio for {len(df_clean)} SNPs with maternal genotypes[/green]")
     
     with Progress(
         TextColumn("[progress.description]{task.description}"),
@@ -890,7 +885,7 @@ def LR_calculator_with_maternal_reads(
         TimeElapsedColumn(),
         console=console
     ) as progress:
-        task = progress.add_task("Computing likelihood ratios...", total=len(df_clean))
+        task = progress.add_task("Computing log likelihood ratios...", total=len(df_clean))
         
         for idx, snp in df_clean.iterrows():
             ref_count = int(snp[ref_col])
@@ -948,15 +943,11 @@ def LR_calculator_with_maternal_reads(
             
             progress.advance(task)
 
-    # Compute final likelihood ratio
+    # Compute final log likelihood ratio
     delta_logL = logL_trisomy - logL_disomy
     
-    if delta_logL > 700:
-        return float('inf')
-    elif delta_logL < -700:
-        return 0.0
-    else:
-        return math.exp(delta_logL)
+    # Return log likelihood ratio directly (no need for overflow handling since we're not exponentiating)
+    return delta_logL
 
 
 @click.command()
@@ -1081,10 +1072,10 @@ def main(
     verbose: bool
 ) -> None:
     """
-    Fetal Fraction Estimation and Likelihood Ratio Calculator.
+    Fetal Fraction Estimation and Log Likelihood Ratio Calculator.
     
     This tool analyzes cell-free DNA sequencing data to estimate fetal fraction
-    and calculate likelihood ratios for trisomy detection across chromosomes.
+    and calculate log likelihood ratios for trisomy detection across chromosomes.
     
     The input file should be a TSV.GZ file with columns:
     chr, pos, af, and read count columns (names configurable via CLI options)
@@ -1102,7 +1093,7 @@ def main(
     - min-raw-depth: Filter SNPs by minimum cfDNA read depth
     - min-model-depth: Filter SNPs by minimum model filtered read depth (cfDNA+model mode only)
     
-    Results are saved as TSV files with fetal fraction estimates and likelihood ratios.
+    Results are saved as TSV files with fetal fraction estimates and log likelihood ratios.
     
     Multi-threading is used by default to speed up fetal fraction estimation.
     Use --ncpus to control the number of CPU cores used.
@@ -1141,7 +1132,7 @@ def main(
         
         # Display startup information
         console.print(Panel.fit(
-            f"[bold green]Fetal Fraction & Likelihood Ratio Calculator[/bold green]\n"
+            f"[bold green]Fetal Fraction & Log Likelihood Ratio Calculator[/bold green]\n"
             f"Input: {input_path}\n"
             f"Output: {output_dir}\n"
             f"{mode_info}\n"
@@ -1289,8 +1280,8 @@ def main(
                             alt_col=model_alt_col
                         )
                 
-                # Calculate likelihood ratio for target chromosome
-                console.print(f"[cyan]Calculating likelihood ratio for {chr_name}...[/cyan]")
+                # Calculate log likelihood ratio for target chromosome
+                console.print(f"[cyan]Calculating log likelihood ratio for {chr_name}...[/cyan]")
                 if mode == 'cfDNA':
                     lr = LR_calculator(target_data, 
                                        est_ff, 
@@ -1316,11 +1307,11 @@ def main(
                 # Store results
                 results_list.append({
                     'Chrom': chr_name,
-                    'LR': lr,
+                    'Log_LR': lr,
                     'Fetal Fraction': est_ff
                 })
                 
-                console.print(f"[green]✓ {chr_name}: FF = {est_ff:.3f}, LR = {lr:.2e}[/green]")
+                console.print(f"[green]✓ {chr_name}: FF = {est_ff:.3f}, Log LR = {lr:.2f}[/green]")
 
             except Exception as e:
                 console.print(f"[red]✗ Error processing {chr_name}: {str(e)}[/red]")
@@ -1331,7 +1322,7 @@ def main(
         # Save results
         if results_list:
             console.print(f"\n[cyan]Saving results to {output_path}...[/cyan]")
-            results_df = pd.DataFrame(results_list, columns=['Chrom', 'LR', 'Fetal Fraction'])
+            results_df = pd.DataFrame(results_list, columns=['Chrom', 'Log_LR', 'Fetal Fraction'])
             results_df.to_csv(output_path, sep='\t', index=False)
             
             # Display summary table
@@ -1513,33 +1504,34 @@ def display_results_summary(results_df: pd.DataFrame) -> None:
     Display a formatted summary table of results.
     
     Args:
-        results_df: DataFrame containing LR and FF results with columns 'Chrom', 'LR', 'Fetal Fraction'.
+        results_df: DataFrame containing Log_LR and FF results with columns 'Chrom', 'Log_LR', 'Fetal Fraction'.
     """
     table = Table(title="Analysis Results Summary")
     table.add_column("Chromosome", justify="center", style="cyan")
     table.add_column("Fetal Fraction", justify="right", style="green")
-    table.add_column("Likelihood Ratio", justify="right", style="yellow")
+    table.add_column("Log Likelihood Ratio", justify="right", style="yellow")
     table.add_column("Interpretation", justify="center", style="magenta")
     
     for _, row in results_df.iterrows():
         chr_name = row['Chrom']
         ff_val = row['Fetal Fraction']
-        lr_val = row['LR']
+        log_lr_val = row['Log_LR']
         
-        # Simple interpretation logic
-        if lr_val > 10:
+        # Simple interpretation logic based on log likelihood ratios
+        # log(10) ≈ 2.3, log(1) = 0
+        if log_lr_val > np.log(10):  # Equivalent to LR > 10
             interpretation = "Strong Evidence"
-        elif lr_val > 1:
+        elif log_lr_val > 0:  # Equivalent to LR > 1
             interpretation = "Moderate Evidence"
-        elif lr_val == 1:
+        elif log_lr_val == 0:  # Equivalent to LR = 1
             interpretation = "No Evidence"
-        else:
+        else:  # log_lr_val < 0, equivalent to LR < 1
             interpretation = "Against Trisomy"
         
         table.add_row(
             str(chr_name.replace("chr", "")),
             f"{ff_val:.3f}",
-            f"{lr_val:.2e}" if lr_val != float('inf') else "∞",
+            f"{log_lr_val:.2f}",
             interpretation
         )
     

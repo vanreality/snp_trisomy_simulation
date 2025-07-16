@@ -70,15 +70,15 @@ def load_lr_file(filepath: Path) -> pd.DataFrame:
         raise ValueError(f"Failed to read file {filepath}: {str(e)}")
     
     # Validate expected columns
-    expected_cols = {'Chrom', 'LR', 'Fetal Fraction'}
+    expected_cols = {'Chrom', 'Log_LR', 'Fetal Fraction'}
     if not expected_cols.issubset(df.columns):
         missing = expected_cols - set(df.columns)
         raise ValueError(f"Missing expected columns in {filepath}: {missing}")
     
     # Validate data types
-    if not pd.api.types.is_numeric_dtype(df['LR']):
-        console.print(f"[yellow]Warning: Converting LR column to numeric in {filepath.name}[/yellow]")
-        df['LR'] = pd.to_numeric(df['LR'], errors='coerce')
+    if not pd.api.types.is_numeric_dtype(df['Log_LR']):
+        console.print(f"[yellow]Warning: Converting Log_LR column to numeric in {filepath.name}[/yellow]")
+        df['Log_LR'] = pd.to_numeric(df['Log_LR'], errors='coerce')
     
     if not pd.api.types.is_numeric_dtype(df['Fetal Fraction']):
         console.print(f"[yellow]Warning: Converting Fetal Fraction column to numeric in {filepath.name}[/yellow]")
@@ -129,7 +129,7 @@ def merge_lr_files(input_files: List[Path]) -> pd.DataFrame:
                 # Rename columns to standard format
                 df = df.rename(columns={
                     'Chrom': 'chr',
-                    'LR': 'lr',
+                    'Log_LR': 'log_lr',
                     'Fetal Fraction': 'ff'
                 })
                 
@@ -137,7 +137,7 @@ def merge_lr_files(input_files: List[Path]) -> pd.DataFrame:
                 df['sample'] = sample_name
                 
                 # Reorder columns for consistency
-                df = df[['chr', 'lr', 'ff', 'sample']]
+                df = df[['chr', 'log_lr', 'ff', 'sample']]
                 
                 merged_data.append(df)
                 
@@ -194,7 +194,7 @@ def validate_merged_data(df: pd.DataFrame) -> None:
         raise ValueError("Missing sample values found in merged data")
     
     # Validate data types and ranges
-    numeric_cols = ['lr', 'ff']
+    numeric_cols = ['log_lr', 'ff']
     for col in numeric_cols:
         if not pd.api.types.is_numeric_dtype(df[col]):
             console.print(f"[yellow]Warning: Column '{col}' is not numeric, attempting conversion[/yellow]")
@@ -207,8 +207,8 @@ def validate_merged_data(df: pd.DataFrame) -> None:
     if df['ff'].min() < 0 or df['ff'].max() > 1:
         console.print(f"[yellow]Warning: Fetal fraction values outside expected range [0,1]: {df['ff'].min():.3f} - {df['ff'].max():.3f}[/yellow]")
     
-    if df['lr'].min() < 0:
-        console.print(f"[yellow]Warning: Negative likelihood ratio values found: {df['lr'].min():.2e}[/yellow]")
+    if df['log_lr'].min() < 0:
+        console.print(f"[yellow]Warning: Negative likelihood ratio values found: {df['log_lr'].min():.2e}[/yellow]")
     
     # Check for duplicate entries
     duplicate_mask = df.duplicated(subset=['chr', 'sample'])
@@ -232,7 +232,7 @@ def display_summary(df: pd.DataFrame) -> None:
     # Create summary by sample
     summary_stats = df.groupby('sample').agg({
         'chr': 'count',
-        'lr': ['mean', 'std', 'min', 'max'],
+        'log_lr': ['mean', 'std', 'min', 'max'],
         'ff': ['mean', 'std', 'min', 'max']
     }).round(3)
     
@@ -249,7 +249,7 @@ def display_summary(df: pd.DataFrame) -> None:
         f"Total Records: {len(df):,}\n"
         f"Unique Samples: {df['sample'].nunique()}\n"
         f"Chromosomes: {chr_display}\n"
-        f"LR Range: {df['lr'].min():.2e} - {df['lr'].max():.2e}\n"
+        f"Log_LR Range: {df['log_lr'].min():.2e} - {df['log_lr'].max():.2e}\n"
         f"FF Range: {df['ff'].min():.3f} - {df['ff'].max():.3f}\n"
         f"Mean FF: {df['ff'].mean():.3f} ± {df['ff'].std():.3f}",
         title="Results Overview"
@@ -260,7 +260,7 @@ def display_summary(df: pd.DataFrame) -> None:
         table = Table(title="Per-Sample Summary")
         table.add_column("Sample", justify="left", style="cyan")
         table.add_column("Chromosomes", justify="right", style="green")
-        table.add_column("Mean LR", justify="right", style="yellow")
+        table.add_column("Mean Log_LR", justify="right", style="yellow")
         table.add_column("Mean FF", justify="right", style="magenta")
         table.add_column("FF Range", justify="right", style="blue")
         
@@ -269,7 +269,7 @@ def display_summary(df: pd.DataFrame) -> None:
             table.add_row(
                 sample,
                 str(len(sample_data)),
-                f"{sample_data['lr'].mean():.2e}",
+                f"{sample_data['log_lr'].mean():.2e}",
                 f"{sample_data['ff'].mean():.3f}",
                 f"{sample_data['ff'].min():.3f}-{sample_data['ff'].max():.3f}"
             )
@@ -309,9 +309,9 @@ def main(input_files: str, output: Path, verbose: bool, force: bool) -> None:
     into a single consolidated TSV file for downstream analysis.
     
     Input files are expected to be named as: ${sample}_pileup_lr.tsv
-    Each file should contain columns: ['Chrom', 'LR', 'Fetal Fraction']
+    Each file should contain columns: ['Chrom', 'Log_LR', 'Fetal Fraction']
     
-    Output will have columns: ['chr', 'lr', 'ff', 'sample']
+    Output will have columns: ['chr', 'log_lr', 'ff', 'sample']
     
     The script performs comprehensive validation and provides detailed progress
     reporting and error handling.
@@ -340,7 +340,7 @@ def main(input_files: str, output: Path, verbose: bool, force: bool) -> None:
         
         # Display startup information
         console.print(Panel.fit(
-            f"[bold green]LR Output Merger[/bold green]\n"
+            f"[bold green]Log Likelihood Ratio Output Merger[/bold green]\n"
             f"Input Files: {len(valid_files)}\n"
             f"Output: {output}\n"
             f"Verbose: {verbose}\n"
