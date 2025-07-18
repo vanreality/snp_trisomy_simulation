@@ -70,6 +70,68 @@ def _log_sum_exp_global(log_values: np.ndarray) -> float:
     return max_val + math.log(np.sum(np.exp(log_values - max_val)))
 
 
+def _get_trisomy_factor_distribution(n_points: int = 21) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Generate discretized trisomy factor distribution N(1.5, 0.5^2).
+    
+    Args:
+        n_points (int): Number of discretization points. Defaults to 21.
+    
+    Returns:
+        Tuple[np.ndarray, np.ndarray]: (factor_values, log_probabilities)
+            - factor_values: Array of factor values
+            - log_probabilities: Log probabilities for each factor value
+    """
+    # Parameters for the trisomy factor distribution
+    mean = 1.5
+    std = 0.5
+    
+    # Create discretization points covering 3 standard deviations on each side
+    min_factor = max(0.1, mean - 3 * std)  # Ensure positive factor
+    max_factor = mean + 3 * std
+    
+    factor_values = np.linspace(min_factor, max_factor, n_points)
+    
+    # Compute log probabilities (unnormalized is fine since we'll normalize)
+    log_probs = -0.5 * ((factor_values - mean) / std) ** 2
+    
+    # Normalize to get proper log probabilities
+    log_probs = log_probs - _log_sum_exp_global(log_probs)
+    
+    return factor_values, log_probs
+
+
+def _get_disomy_factor_distribution(n_points: int = 21) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Generate discretized disomy factor distribution N(1.0, 0.5^2).
+    
+    Args:
+        n_points (int): Number of discretization points. Defaults to 21.
+    
+    Returns:
+        Tuple[np.ndarray, np.ndarray]: (factor_values, log_probabilities)
+            - factor_values: Array of factor values
+            - log_probabilities: Log probabilities for each factor value
+    """
+    # Parameters for the disomy factor distribution
+    mean = 1.0
+    std = 0.5
+    
+    # Create discretization points covering 3 standard deviations on each side
+    min_factor = max(0.1, mean - 3 * std)  # Ensure positive factor
+    max_factor = mean + 3 * std
+    
+    factor_values = np.linspace(min_factor, max_factor, n_points)
+    
+    # Compute log probabilities (unnormalized is fine since we'll normalize)
+    log_probs = -0.5 * ((factor_values - mean) / std) ** 2
+    
+    # Normalize to get proper log probabilities
+    log_probs = log_probs - _log_sum_exp_global(log_probs)
+    
+    return factor_values, log_probs
+
+
 def _compute_ff_likelihood_chunk(args: Tuple) -> Dict[float, float]:
     """
     Worker function to compute log-likelihood for a chunk of fetal fraction values.
@@ -130,15 +192,18 @@ class FFEstimator:
         Initialize the Fetal Fraction Estimator.
         
         Args:
-            mode (str): Analysis mode, either 'cfDNA' or 'cfDNA+WBC'. 
+            mode (str): Analysis mode, options: 'cfDNA', 'cfDNA+WBC', 'cfDNA+model', or 'cfDNA+model+mGT'. 
                        'cfDNA' uses only cell-free DNA reads.
                        'cfDNA+WBC' incorporates maternal white blood cell genotyping.
+                       'cfDNA+model' uses modeled fetal reads for estimation.
+                       'cfDNA+model+mGT' uses modeled reads with maternal genotyping.
         
         Raises:
-            ValueError: If mode is not 'cfDNA' or 'cfDNA+WBC'.
+            ValueError: If mode is not one of the supported modes.
         """
-        if mode not in ['cfDNA', 'cfDNA+WBC']:
-            raise ValueError(f"Invalid mode: {mode}. Must be 'cfDNA' or 'cfDNA+WBC'")
+        valid_modes = ['cfDNA', 'cfDNA+WBC', 'cfDNA+model', 'cfDNA+model+mGT']
+        if mode not in valid_modes:
+            raise ValueError(f"Invalid mode: {mode}. Must be one of: {valid_modes}")
         
         self.mode = mode
         console.print(f"[green]FFEstimator initialized in {mode} mode[/green]")
@@ -198,6 +263,18 @@ class FFEstimator:
                 alt_col=alt_col,
                 maternal_ref_col=maternal_ref_col,
                 maternal_alt_col=maternal_alt_col
+            )
+        elif self.mode in ['cfDNA+model', 'cfDNA+model+mGT']:
+            # Both cfDNA+model modes use model reads for fetal fraction estimation
+            # Note: For cfDNA+model+mGT, maternal genotyping is only used in LLR calculation
+            return self._estimate_fetal_fraction_cfdna(
+                background_chr_df=background_chr_df,
+                f_min=f_min,
+                f_max=f_max,
+                f_step=f_step,
+                ncpus=ncpus,
+                ref_col=ref_col,
+                alt_col=alt_col
             )
         else:
             raise ValueError(f"Unsupported mode: {self.mode}")
@@ -556,23 +633,34 @@ class LLRCalculator:
     trisomy vs. disomy detection using different analysis modes.
     """
     
-    def __init__(self, mode: str = 'cfDNA'):
+    def __init__(self, mode: str = 'cfDNA', factor_modeling: bool = False):
         """
         Initialize the Log Likelihood Ratio Calculator.
         
         Args:
-            mode (str): Analysis mode, either 'cfDNA' or 'cfDNA+WBC'.
+            mode (str): Analysis mode, options: 'cfDNA', 'cfDNA+WBC', 'cfDNA+model', or 'cfDNA+model+mGT'.
                        'cfDNA' uses only cell-free DNA reads.
                        'cfDNA+WBC' incorporates maternal white blood cell genotyping.
+                       'cfDNA+model' uses modeled fetal reads for calculation.
+                       'cfDNA+model+mGT' uses modeled reads with maternal genotyping filtering.
+            factor_modeling (bool): Whether to use probabilistic modeling for read release factors.
+                                  If True, uses normal distributions for disomy (N(1, 0.5²)) and trisomy (N(1.55, 0.6²)).
+                                  If False, uses fixed factors (1.0 for disomy, 1.5 for trisomy).
         
         Raises:
-            ValueError: If mode is not 'cfDNA' or 'cfDNA+WBC'.
+            ValueError: If mode is not one of the supported modes.
         """
-        if mode not in ['cfDNA', 'cfDNA+WBC']:
-            raise ValueError(f"Invalid mode: {mode}. Must be 'cfDNA' or 'cfDNA+WBC'")
+        valid_modes = ['cfDNA', 'cfDNA+WBC', 'cfDNA+model', 'cfDNA+model+mGT']
+        if mode not in valid_modes:
+            raise ValueError(f"Invalid mode: {mode}. Must be one of: {valid_modes}")
         
         self.mode = mode
-        console.print(f"[green]LLRCalculator initialized in {mode} mode[/green]")
+        self.factor_modeling = factor_modeling
+        
+        if factor_modeling:
+            console.print(f"[green]LLRCalculator initialized in {mode} mode with probabilistic factor modeling[/green]")
+        else:
+            console.print(f"[green]LLRCalculator initialized in {mode} mode with fixed factors[/green]")
     
     def calculate(
         self,
@@ -609,6 +697,24 @@ class LLRCalculator:
             )
         elif self.mode == 'cfDNA+WBC':
             return self._calculate_lr_with_maternal_reads(
+                input_df=input_df,
+                fetal_fraction=fetal_fraction,
+                ref_col=ref_col,
+                alt_col=alt_col,
+                maternal_ref_col=maternal_ref_col,
+                maternal_alt_col=maternal_alt_col
+            )
+        elif self.mode == 'cfDNA+model':
+            # Use model reads directly for LLR calculation (like cfDNA mode)
+            return self._calculate_lr_cfdna(
+                input_df=input_df,
+                fetal_fraction=fetal_fraction,
+                ref_col=ref_col,
+                alt_col=alt_col
+            )
+        elif self.mode == 'cfDNA+model+mGT':
+            # Use model reads with maternal genotyping filtering
+            return self._calculate_lr_with_model_and_maternal_genotyping(
                 input_df=input_df,
                 fetal_fraction=fetal_fraction,
                 ref_col=ref_col,
@@ -761,30 +867,7 @@ class LLRCalculator:
                     prob = p_m * (paternal_alt_prob if k_p == 1 else (1 - paternal_alt_prob))
                     fetal_dosage_probs[d] += prob
             return fetal_dosage_probs
-        
-        def log_binomial_pmf(k: int, n: int, p: float) -> float:
-            """Compute log-probability mass function of Binomial(n, p) at k."""
-            if p < 0.0 or p > 1.0 or n < 0 or k < 0 or k > n:
-                return float('-inf')
-            
-            if p == 0.0:
-                return 0.0 if k == 0 else float('-inf')
-            if p == 1.0:
-                return 0.0 if k == n else float('-inf')
-            
-            # Use log-gamma for numerical stability
-            log_comb = (math.lgamma(n + 1) - math.lgamma(k + 1) - math.lgamma(n - k + 1))
-            return log_comb + k * math.log(p) + (n - k) * math.log(1.0 - p)
-        
-        def logsumexp(log_values: np.ndarray) -> float:
-            """Numerically stable log-sum-exp computation."""
-            if len(log_values) == 0:
-                return float('-inf')
-            max_val = np.max(log_values)
-            if max_val == float('-inf'):
-                return float('-inf')
-            return max_val + math.log(np.sum(np.exp(log_values - max_val)))
-        
+
         # Main likelihood computation
         logL_disomy = 0.0
         logL_trisomy = 0.0
@@ -839,12 +922,33 @@ class LLRCalculator:
                             log_p_gf = math.log(p_gf)
                             
                             d_fetal = sum(int(allele) for allele in gf.split('/'))
-                            p_alt_exp = ((1.0 - fetal_fraction) * (d_maternal / 2.0) +
-                                       fetal_fraction * (d_fetal / 2.0))
                             
-                            log_p_obs = log_binomial_pmf(alt_count, depth, p_alt_exp)
-                            if log_p_obs != float('-inf'):
-                                log_terms_disomy.append(log_p_gm + log_p_gp + log_p_gf + log_p_obs)
+                            if self.factor_modeling:
+                                # Use probabilistic disomy factor distribution
+                                disomy_factor_values, disomy_log_factor_probs = _get_disomy_factor_distribution()
+                                
+                                # Integrate over disomy factor distribution
+                                log_obs_terms_disomy = []
+                                for factor, log_factor_prob in zip(disomy_factor_values, disomy_log_factor_probs):
+                                    p_alt_exp = ((1.0 - factor * fetal_fraction) * (d_maternal / 2.0) + 
+                                               factor * fetal_fraction * (d_fetal / 2.0))
+                                    
+                                    log_p_obs = _log_binomial_pmf_global(alt_count, depth, p_alt_exp)
+                                    if log_p_obs != float('-inf'):
+                                        log_obs_terms_disomy.append(log_factor_prob + log_p_obs)
+                                
+                                # Combine all factor-weighted observations for disomy
+                                if log_obs_terms_disomy:
+                                    log_integrated_obs_disomy = _log_sum_exp_global(np.array(log_obs_terms_disomy))
+                                    log_terms_disomy.append(log_p_gm + log_p_gp + log_p_gf + log_integrated_obs_disomy)
+                            else:
+                                # Use fixed disomy factor (1.0)
+                                p_alt_exp = ((1.0 - fetal_fraction) * (d_maternal / 2.0) + 
+                                           fetal_fraction * (d_fetal / 2.0))
+                                
+                                log_p_obs = _log_binomial_pmf_global(alt_count, depth, p_alt_exp)
+                                if log_p_obs != float('-inf'):
+                                    log_terms_disomy.append(log_p_gm + log_p_gp + log_p_gf + log_p_obs)
                         
                         # Trisomy calculation
                         fetal_dist_tri = get_fetal_prob_trisomy(gm, gp)
@@ -854,22 +958,42 @@ class LLRCalculator:
                                 continue
                             log_p_fd = math.log(p_fd)
                             
-                            p_alt_exp_tri = ((1.0 - 1.5 * fetal_fraction) * (d_maternal / 2.0) +
-                                             1.5 * fetal_fraction * (d_fetal / 3.0))
-                            
-                            log_p_obs_tri = log_binomial_pmf(alt_count, depth, p_alt_exp_tri)
-                            if log_p_obs_tri != float('-inf'):
-                                log_terms_trisomy.append(log_p_gm + log_p_gp + log_p_fd + log_p_obs_tri)
+                            if self.factor_modeling:
+                                # Use probabilistic trisomy factor distribution
+                                factor_values, log_factor_probs = _get_trisomy_factor_distribution()
+                                
+                                # Integrate over trisomy factor distribution
+                                log_obs_terms = []
+                                for factor, log_factor_prob in zip(factor_values, log_factor_probs):
+                                    p_alt_exp_tri = ((1.0 - factor * fetal_fraction) * (d_maternal / 2.0) + 
+                                                   factor * fetal_fraction * (d_fetal / 3.0))
+                                    
+                                    log_p_obs_tri = _log_binomial_pmf_global(alt_count, depth, p_alt_exp_tri)
+                                    if log_p_obs_tri != float('-inf'):
+                                        log_obs_terms.append(log_factor_prob + log_p_obs_tri)
+                                
+                                # Combine all factor-weighted observations
+                                if log_obs_terms:
+                                    log_integrated_obs = _log_sum_exp_global(np.array(log_obs_terms))
+                                    log_terms_trisomy.append(log_p_gm + log_p_gp + log_p_fd + log_integrated_obs)
+                            else:
+                                # Use fixed trisomy factor (1.5)
+                                p_alt_exp_tri = ((1.0 - 1.5 * fetal_fraction) * (d_maternal / 2.0) + 
+                                               1.5 * fetal_fraction * (d_fetal / 3.0))
+                                
+                                log_p_obs_tri = _log_binomial_pmf_global(alt_count, depth, p_alt_exp_tri)
+                                if log_p_obs_tri != float('-inf'):
+                                    log_terms_trisomy.append(log_p_gm + log_p_gp + log_p_fd + log_p_obs_tri)
                 
                 # Compute SNP-level log-likelihoods
                 if log_terms_disomy:
-                    logL_snp_disomy = logsumexp(np.array(log_terms_disomy))
+                    logL_snp_disomy = _log_sum_exp_global(np.array(log_terms_disomy))
                     logL_disomy += logL_snp_disomy
                 else:
                     return 0.0  # No valid disomy combinations
                 
                 if log_terms_trisomy:
-                    logL_snp_trisomy = logsumexp(np.array(log_terms_trisomy))
+                    logL_snp_trisomy = _log_sum_exp_global(np.array(log_terms_trisomy))
                     logL_trisomy += logL_snp_trisomy
                 else:
                     return 0.0  # No valid trisomy combinations
@@ -1063,11 +1187,31 @@ class LLRCalculator:
                             continue
                         log_p_gf = math.log(p_gf)
                         d_fetal = sum(int(allele) for allele in gf.split('/'))
-                        p_alt_exp = ((1.0 - fetal_fraction) * (d_maternal / 2.0) +
-                                 fetal_fraction * (d_fetal / 2.0))
-                        log_p_obs = _log_binomial_pmf_global(alt_count, depth, p_alt_exp)
-                        if log_p_obs > float('-inf'):
-                            log_terms_disomy.append(log_p_gp + log_p_gf + log_p_obs)
+                        
+                        if self.factor_modeling:
+                            # Use probabilistic disomy factor distribution
+                            disomy_factor_values, disomy_log_factor_probs = _get_disomy_factor_distribution()
+                            
+                            # Integrate over disomy factor distribution
+                            log_obs_terms_disomy = []
+                            for factor, log_factor_prob in zip(disomy_factor_values, disomy_log_factor_probs):
+                                p_alt_exp = ((1.0 - factor * fetal_fraction) * (d_maternal / 2.0) +
+                                             factor * fetal_fraction * (d_fetal / 2.0))
+                                log_p_obs = _log_binomial_pmf_global(alt_count, depth, p_alt_exp)
+                                if log_p_obs > float('-inf'):
+                                    log_obs_terms_disomy.append(log_factor_prob + log_p_obs)
+                            
+                            # Combine all factor-weighted observations for disomy
+                            if log_obs_terms_disomy:
+                                log_integrated_obs_disomy = _log_sum_exp_global(np.array(log_obs_terms_disomy))
+                                log_terms_disomy.append(log_p_gp + log_p_gf + log_integrated_obs_disomy)
+                        else:
+                            # Use fixed disomy factor (1.0)
+                            p_alt_exp = ((1.0 - fetal_fraction) * (d_maternal / 2.0) +
+                                         fetal_fraction * (d_fetal / 2.0))
+                            log_p_obs = _log_binomial_pmf_global(alt_count, depth, p_alt_exp)
+                            if log_p_obs > float('-inf'):
+                                log_terms_disomy.append(log_p_gp + log_p_gf + log_p_obs)
 
                     # Trisomy calculation
                     fetal_dist_tri = get_fetal_prob_trisomy(gm, gp)
@@ -1077,12 +1221,32 @@ class LLRCalculator:
                             continue
                         log_p_fd = math.log(p_fd)
                         
-                        p_alt_exp_tri = ((1.0 - 1.5 * fetal_fraction) * (d_maternal / 2.0) +
-                                         1.5 * fetal_fraction * (d_fetal / 3.0))
-                        
-                        log_p_obs_tri = _log_binomial_pmf_global(alt_count, depth, p_alt_exp_tri)
-                        if log_p_obs_tri > float('-inf'):
-                            log_terms_trisomy.append(log_p_gp + log_p_fd + log_p_obs_tri)
+                        if self.factor_modeling:
+                            # Use probabilistic trisomy factor distribution
+                            factor_values, log_factor_probs = _get_trisomy_factor_distribution()
+                            
+                            # Integrate over trisomy factor distribution
+                            log_obs_terms = []
+                            for factor, log_factor_prob in zip(factor_values, log_factor_probs):
+                                p_alt_exp_tri = ((1.0 - factor * fetal_fraction) * (d_maternal / 2.0) +
+                                                 factor * fetal_fraction * (d_fetal / 3.0))
+                                
+                                log_p_obs_tri = _log_binomial_pmf_global(alt_count, depth, p_alt_exp_tri)
+                                if log_p_obs_tri > float('-inf'):
+                                    log_obs_terms.append(log_factor_prob + log_p_obs_tri)
+                            
+                            # Combine all factor-weighted observations
+                            if log_obs_terms:
+                                log_integrated_obs = _log_sum_exp_global(np.array(log_obs_terms))
+                                log_terms_trisomy.append(log_p_gp + log_p_fd + log_integrated_obs)
+                        else:
+                            # Use fixed trisomy factor (1.5)
+                            p_alt_exp_tri = ((1.0 - 1.5 * fetal_fraction) * (d_maternal / 2.0) +
+                                            1.5 * fetal_fraction * (d_fetal / 3.0))
+                            
+                            log_p_obs_tri = _log_binomial_pmf_global(alt_count, depth, p_alt_exp_tri)
+                            if log_p_obs_tri > float('-inf'):
+                                log_terms_trisomy.append(log_p_gp + log_p_fd + log_p_obs_tri)
 
                 # Compute SNP-level log-likelihoods
                 if log_terms_disomy:
@@ -1097,6 +1261,287 @@ class LLRCalculator:
         delta_logL = logL_trisomy - logL_disomy
         
         # Return log likelihood ratio directly (no need for overflow handling since we're not exponentiating)
+        return delta_logL
+
+    def _calculate_lr_with_model_and_maternal_genotyping(
+        self,
+        input_df: pd.DataFrame,
+        fetal_fraction: float,
+        ref_col: str = 'cfDNA_ref_reads',
+        alt_col: str = 'cfDNA_alt_reads',
+        maternal_ref_col: str = 'maternal_ref_reads',
+        maternal_alt_col: str = 'maternal_alt_reads'
+    ) -> float:
+        """
+        Calculate the log likelihood ratio (log LR) of trisomy vs. disomy for a target chromosome,
+        using modeled fetal reads with maternal genotyping filtering.
+
+        This function:
+        1. Uses modeled fetal reads for LLR calculation
+        2. Genotypes maternal reads (calculated as cfDNA - model reads)
+        3. Filters to only homozygous maternal sites (0/0 and 1/1) for calculation
+        4. Performs LLR calculation on the filtered homozygous SNPs
+
+        Args:
+            input_df (pd.DataFrame): DataFrame with SNP data including cfDNA and model reads.
+                Required columns: 'chr', 'pos', 'af', cfDNA reads, and model reads.
+                Maternal reads will be calculated as cfDNA - model reads.
+            fetal_fraction (float): Estimated fetal fraction in maternal plasma (0 < ff < 1).
+            ref_col (str, optional): Column name for cfDNA reference reads.
+            alt_col (str, optional): Column name for cfDNA alternative reads.
+            maternal_ref_col (str, optional): Column for calculated maternal reference reads.
+            maternal_alt_col (str, optional): Column for calculated maternal alternative reads.
+
+        Returns:
+            float: The log likelihood ratio (log LR) = log(L_trisomy) - log(L_disomy).
+                   Positive values indicate evidence for trisomy, negative values indicate evidence for disomy.
+
+        Raises:
+            ValueError: If input data is invalid, fetal fraction is out of range,
+                        or required columns are missing.
+        """
+        # Input validation
+        required_cols = {'chr', 'pos', 'af', ref_col, alt_col, maternal_ref_col, maternal_alt_col}
+        if not required_cols.issubset(input_df.columns):
+            missing = required_cols - set(input_df.columns)
+            raise ValueError(f"Input DataFrame is missing required columns: {missing}")
+
+        if not (0.0 < fetal_fraction < 1.0):
+            raise ValueError(f"fetal_fraction must be between 0 and 1 (exclusive): {fetal_fraction}")
+
+        if input_df.empty:
+            raise ValueError("No SNPs found in input DataFrame")
+
+        # Data cleaning and validation
+        df_clean = input_df.copy()
+        invalid_mask = (
+            (df_clean['af'] < 0) | (df_clean['af'] > 1) |
+            (df_clean[ref_col] < 0) | (df_clean[alt_col] < 0) |
+            ((df_clean[ref_col] + df_clean[alt_col]) == 0) |
+            (df_clean[maternal_ref_col] < 0) | (df_clean[maternal_alt_col] < 0)
+        )
+
+        if invalid_mask.any():
+            console.print(f"[yellow]Warning: Removing {invalid_mask.sum()} invalid SNPs[/yellow]")
+            df_clean = df_clean[~invalid_mask]
+
+        if df_clean.empty:
+            raise ValueError("No valid SNPs remaining after filtering")
+
+        # Genotype maternal reads to filter for homozygous sites
+        m_ref = df_clean[maternal_ref_col].to_numpy(dtype=np.int32)
+        m_alt = df_clean[maternal_alt_col].to_numpy(dtype=np.int32)
+        m_n = m_ref + m_alt
+        
+        # Avoid division by zero
+        valid_coverage = m_n > 0
+        if not valid_coverage.any():
+            console.print("[yellow]Warning: No maternal reads with coverage > 0[/yellow]")
+            return 0.0
+        
+        # Calculate maternal alt allele fraction
+        maternal_alt_fraction = np.zeros_like(m_n, dtype=np.float64)
+        maternal_alt_fraction[valid_coverage] = m_alt[valid_coverage] / m_n[valid_coverage]
+        
+        # Genotype maternal reads using simple thresholds
+        # 0/0: alt_fraction < 0.2, 0/1: 0.2 <= alt_fraction <= 0.8, 1/1: alt_fraction > 0.8
+        maternal_genotype_mask = np.zeros(len(df_clean), dtype=bool)
+        
+        # Keep only homozygous sites (0/0 or 1/1)
+        homozygous_00 = (maternal_alt_fraction < 0.2) & valid_coverage
+        homozygous_11 = (maternal_alt_fraction > 0.8) & valid_coverage
+        maternal_genotype_mask = homozygous_00 | homozygous_11
+
+        # Keep only heterozygous sites (0/1)
+        # heterozygous_01 = (maternal_alt_fraction >= 0.2) & (maternal_alt_fraction <= 0.8) & valid_coverage
+        # maternal_genotype_mask = heterozygous_01
+        
+        # Filter to homozygous sites only
+        df_filtered = df_clean[maternal_genotype_mask].reset_index(drop=True)
+        
+        if len(df_filtered) == 0:
+            console.print("[yellow]Warning: No homozygous maternal sites found for analysis[/yellow]")
+            return 0.0
+        
+        console.print(f"[cyan]Filtered to {len(df_filtered)} homozygous maternal sites out of {len(df_clean)} total SNPs[/cyan]")
+        
+        # Helper functions for genotype modeling (same as cfDNA mode)
+        def genotype_priors(af: float) -> Dict[str, float]:
+            """Compute Hardy-Weinberg genotype priors for a given allele frequency."""
+            return {
+                '0/0': (1.0 - af) ** 2,
+                '0/1': 2.0 * af * (1.0 - af),
+                '1/1': af ** 2
+            }
+
+        def get_fetal_prob_disomy(gm: str, gp: str) -> Dict[str, float]:
+            """Compute fetal genotype probabilities under disomy given parental genotypes."""
+            def allele_probs_from_genotype(gt: str) -> Dict[int, float]:
+                a1, a2 = map(int, gt.split('/'))
+                counts = {0: 0, 1: 0}
+                counts[a1] += 1
+                counts[a2] += 1
+                return {0: counts[0] / 2.0, 1: counts[1] / 2.0}
+            
+            pm = allele_probs_from_genotype(gm)
+            pp = allele_probs_from_genotype(gp)
+            fetal_probs = {'0/0': 0.0, '0/1': 0.0, '1/1': 0.0}
+            
+            for mat_allele, p_mat in pm.items():
+                for pat_allele, p_pat in pp.items():
+                    prob_combo = p_mat * p_pat
+                    fetal_genotype = f"{min(mat_allele, pat_allele)}/{max(mat_allele, pat_allele)}"
+                    fetal_probs[fetal_genotype] += prob_combo
+            return fetal_probs
+
+        def get_fetal_prob_trisomy(gm: str, gp: str) -> Dict[int, float]:
+            """Compute fetal ALT-allele dosage probabilities under trisomy."""
+            def allele_probs(gt: str) -> Dict[int, float]:
+                a1, a2 = map(int, gt.split('/'))
+                counts = {0: 0, 1: 0}
+                counts[a1] += 1
+                counts[a2] += 1
+                return {0: counts[0] / 2.0, 1: counts[1] / 2.0}
+
+            pm = allele_probs(gm)
+            pp = allele_probs(gp)
+            
+            p_mat_alt = pm[1]
+            maternal_dosage_probs = {
+                0: (1 - p_mat_alt) ** 2,
+                1: 2 * p_mat_alt * (1 - p_mat_alt),
+                2: p_mat_alt ** 2
+            }
+            
+            paternal_alt_prob = pp[1]
+            fetal_dosage_probs = {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0}
+            for k_m, p_m in maternal_dosage_probs.items():
+                for k_p in [0, 1]:
+                    d = k_m + k_p
+                    prob = p_m * (paternal_alt_prob if k_p == 1 else (1 - paternal_alt_prob))
+                    fetal_dosage_probs[d] += prob
+            return fetal_dosage_probs
+        
+        # Main likelihood computation using filtered homozygous SNPs
+        logL_disomy = 0.0
+        logL_trisomy = 0.0
+        genotype_labels = ['0/0', '0/1', '1/1']
+        
+        console.print(f"[green]Calculating log likelihood ratio for {len(df_filtered)} homozygous SNPs[/green]")
+        
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeElapsedColumn(),
+            console=console
+        ) as progress:
+            task = progress.add_task("Computing log likelihood ratios (homozygous sites)...", total=len(df_filtered))
+            
+            for idx, snp in df_filtered.iterrows():
+                ref_count = int(snp[ref_col])
+                alt_count = int(snp[alt_col])
+                depth = ref_count + alt_count
+                af = float(snp['af'])
+
+                geno_priors = genotype_priors(af)
+                
+                log_terms_disomy = []
+                log_terms_trisomy = []
+                
+                for gm in genotype_labels:
+                    p_gm = geno_priors[gm]
+                    if p_gm <= 0.0:
+                        continue
+                    log_p_gm = math.log(p_gm)
+                    
+                    # Marginalize over paternal genotypes
+                    for gp in genotype_labels:
+                        p_gp = geno_priors[gp]
+                        if p_gp <= 0.0:
+                            continue
+                        log_p_gp = math.log(p_gp)
+                        
+                        # Disomy calculation
+                        fetal_dist_dis = get_fetal_prob_disomy(gm, gp)
+                        d_maternal = sum(int(allele) for allele in gm.split('/'))
+                        
+                        for gf, p_gf in fetal_dist_dis.items():
+                            if p_gf <= 0.0:
+                                continue
+                            log_p_gf = math.log(p_gf)
+                            d_fetal = sum(int(allele) for allele in gf.split('/'))
+                            
+                            if self.factor_modeling:
+                                # Use probabilistic disomy factor distribution
+                                disomy_factor_values, disomy_log_factor_probs = _get_disomy_factor_distribution()
+                                
+                                # Integrate over disomy factor distribution
+                                log_obs_terms_disomy = []
+                                for factor, log_factor_prob in zip(disomy_factor_values, disomy_log_factor_probs):
+                                    p_alt_exp = ((1.0 - factor * fetal_fraction) * (d_maternal / 2.0) +
+                                                factor * fetal_fraction * (d_fetal / 2.0))
+                                    log_p_obs = _log_binomial_pmf_global(alt_count, depth, p_alt_exp)
+                                    if log_p_obs > float('-inf'):
+                                        log_obs_terms_disomy.append(log_factor_prob + log_p_obs)
+                                
+                                # Combine all factor-weighted observations for disomy
+                                if log_obs_terms_disomy:
+                                    log_integrated_obs_disomy = _log_sum_exp_global(np.array(log_obs_terms_disomy))
+                                    log_terms_disomy.append(log_p_gp + log_p_gf + log_integrated_obs_disomy)
+                            else:
+                                # Use fixed disomy factor (1.0)
+                                p_alt_exp = ((1.0 - fetal_fraction) * (d_maternal / 2.0) +
+                                            fetal_fraction * (d_fetal / 2.0))
+                                log_p_obs = _log_binomial_pmf_global(alt_count, depth, p_alt_exp)
+                                if log_p_obs > float('-inf'):
+                                    log_terms_disomy.append(log_p_gp + log_p_gf + log_p_obs)
+
+                        # Trisomy calculation
+                        fetal_dist_tri = get_fetal_prob_trisomy(gm, gp)
+                        
+                        for d_fetal, p_fd in fetal_dist_tri.items():
+                            if p_fd <= 0.0:
+                                continue
+                            log_p_fd = math.log(p_fd)
+                            
+                            if self.factor_modeling:
+                                # Use probabilistic trisomy factor distribution
+                                factor_values, log_factor_probs = _get_trisomy_factor_distribution()
+                                
+                                # Integrate over trisomy factor distribution
+                                log_obs_terms = []
+                                for factor, log_factor_prob in zip(factor_values, log_factor_probs):
+                                    p_alt_exp_tri = ((1.0 - factor * fetal_fraction) * (d_maternal / 2.0) +
+                                                    factor * fetal_fraction * (d_fetal / 3.0))
+                                    log_p_obs_tri = _log_binomial_pmf_global(alt_count, depth, p_alt_exp_tri)
+                                    if log_p_obs_tri > float('-inf'):
+                                        log_obs_terms.append(log_factor_prob + log_p_obs_tri)
+                                
+                                # Combine all factor-weighted observations
+                                if log_obs_terms:
+                                    log_integrated_obs = _log_sum_exp_global(np.array(log_obs_terms))
+                                    log_terms_trisomy.append(log_p_gp + log_p_fd + log_integrated_obs)
+                            else:
+                                # Use fixed trisomy factor (1.5)
+                                p_alt_exp_tri = ((1.0 - 1.5 * fetal_fraction) * (d_maternal / 2.0) +
+                                               1.5 * fetal_fraction * (d_fetal / 3.0))
+                                log_p_obs_tri = _log_binomial_pmf_global(alt_count, depth, p_alt_exp_tri)
+                                if log_p_obs_tri > float('-inf'):
+                                    log_terms_trisomy.append(log_p_gp + log_p_fd + log_p_obs_tri)
+
+                # Compute SNP-level log-likelihoods
+                if log_terms_disomy:
+                    logL_disomy += _log_sum_exp_global(np.array(log_terms_disomy))
+                
+                if log_terms_trisomy:
+                    logL_trisomy += _log_sum_exp_global(np.array(log_terms_trisomy))
+                
+                progress.advance(task)
+
+        # Compute final log likelihood ratio
+        delta_logL = logL_trisomy - logL_disomy
+        
         return delta_logL
 
 
@@ -1138,9 +1583,9 @@ class LLRCalculator:
 )
 @click.option(
     '--mode',
-    type=click.Choice(['cfDNA', 'cfDNA+WBC', 'cfDNA+model'], case_sensitive=False),
+    type=click.Choice(['cfDNA', 'cfDNA+WBC', 'cfDNA+model', 'cfDNA+model+mGT'], case_sensitive=False),
     default='cfDNA',
-    help='Analysis mode: cfDNA (standard), cfDNA+WBC (with maternal WBC), cfDNA+model (with modeled maternal reads)'
+    help='Analysis mode: cfDNA (standard), cfDNA+WBC (with maternal WBC), cfDNA+model (with modeled maternal reads), cfDNA+model+mGT (with modeled reads and maternal genotyping)'
 )
 @click.option(
     '--cfdna-ref-col',
@@ -1197,6 +1642,12 @@ class LLRCalculator:
     help='Fast mode: estimate fetal fraction once using all chromosomes instead of per-chromosome estimation (default: False)'
 )
 @click.option(
+    '--factor-modeling',
+    is_flag=True,
+    default=False,
+    help='Use probabilistic modeling for read release factors (disomy: N(1, 0.5²), trisomy: N(1.55, 0.6²)) instead of fixed factors (default: False)'
+)
+@click.option(
     '--verbose', '-v',
     is_flag=True,
     help='Enable verbose output'
@@ -1219,6 +1670,7 @@ def main(
     min_model_depth: int,
     ncpus: int,
     fast: bool,
+    factor_modeling: bool,
     verbose: bool
 ) -> None:
     """
@@ -1230,10 +1682,11 @@ def main(
     The input file should be a TSV.GZ file with columns:
     chr, pos, af, and read count columns (names configurable via CLI options)
      
-    Supports three analysis modes:
+    Supports four analysis modes:
     - cfDNA: Standard cell-free DNA analysis
     - cfDNA+WBC: Analysis with maternal white blood cell data
-    - cfDNA+model: Analysis with modeled maternal reads
+    - cfDNA+model: Analysis with modeled fetal reads
+    - cfDNA+model+mGT: Analysis with modeled fetal reads and maternal genotyping filtering
     
     Analysis speed options:
     - Standard mode: Estimates fetal fraction per chromosome using background chromosomes
@@ -1241,7 +1694,7 @@ def main(
     
     Depth filtering options:
     - min-raw-depth: Filter SNPs by minimum cfDNA read depth
-    - min-model-depth: Filter SNPs by minimum model filtered read depth (cfDNA+model mode only)
+    - min-model-depth: Filter SNPs by minimum model filtered read depth (cfDNA+model modes only)
     
     Results are saved as TSV files with fetal fraction estimates and log likelihood ratios.
     
@@ -1267,10 +1720,12 @@ def main(
             column_info = f"cfDNA columns: {cfdna_ref_col}, {cfdna_alt_col}\nWBC columns: {wbc_ref_col}, {wbc_alt_col}"
         elif mode == 'cfDNA+model':
             column_info = f"cfDNA columns: {cfdna_ref_col}, {cfdna_alt_col}\nModel columns: {model_ref_col}, {model_alt_col}"
+        elif mode == 'cfDNA+model+mGT':
+            column_info = f"cfDNA columns: {cfdna_ref_col}, {cfdna_alt_col}\nModel columns: {model_ref_col}, {model_alt_col}\nCalculated maternal columns: {wbc_ref_col}, {wbc_alt_col}"
         
         # Build depth filter info
         depth_filter_info = f"Raw depth filter: ≥{min_raw_depth}"
-        if mode == 'cfDNA+model':
+        if mode in ['cfDNA+model', 'cfDNA+model+mGT']:
             depth_filter_info += f"\nModel depth filter: ≥{min_model_depth}"
         
         # Build analysis mode info
@@ -1320,10 +1775,14 @@ def main(
         if mode in ['cfDNA', 'cfDNA+model']:
             # Use cfDNA mode for both standard and model-based analysis
             ff_estimator = FFEstimator(mode='cfDNA')
-            llr_calculator = LLRCalculator(mode='cfDNA')
+            llr_calculator = LLRCalculator(mode='cfDNA', factor_modeling=factor_modeling)
         elif mode == 'cfDNA+WBC':
             ff_estimator = FFEstimator(mode='cfDNA+WBC')
-            llr_calculator = LLRCalculator(mode='cfDNA+WBC')
+            llr_calculator = LLRCalculator(mode='cfDNA+WBC', factor_modeling=factor_modeling)
+        elif mode == 'cfDNA+model+mGT':
+            # Use cfDNA+model+mGT mode for both FF estimation and LLR calculation
+            ff_estimator = FFEstimator(mode='cfDNA+model+mGT')
+            llr_calculator = LLRCalculator(mode='cfDNA+model+mGT', factor_modeling=factor_modeling)
         
         # Initialize results storage
         results_list = []
@@ -1356,7 +1815,7 @@ def main(
                         maternal_ref_col=wbc_ref_col,
                         maternal_alt_col=wbc_alt_col
                     )
-                elif mode == 'cfDNA+model':
+                elif mode in ['cfDNA+model', 'cfDNA+model+mGT']:
                     global_fetal_fraction, _ = ff_estimator.estimate(
                         df,  # Use all data instead of background only
                         f_min=ff_min,
@@ -1428,7 +1887,7 @@ def main(
                             maternal_ref_col=wbc_ref_col,
                             maternal_alt_col=wbc_alt_col
                         )
-                    elif mode == 'cfDNA+model':
+                    elif mode in ['cfDNA+model', 'cfDNA+model+mGT']:
                         est_ff, _ = ff_estimator.estimate(
                             background_data,
                             f_min=ff_min,
@@ -1461,6 +1920,15 @@ def main(
                         est_ff, 
                         ref_col=model_ref_col, 
                         alt_col=model_alt_col
+                    )
+                elif mode == 'cfDNA+model+mGT':
+                    lr = llr_calculator.calculate(
+                        target_data, 
+                        est_ff, 
+                        ref_col=model_ref_col, 
+                        alt_col=model_alt_col,
+                        maternal_ref_col=wbc_ref_col,
+                        maternal_alt_col=wbc_alt_col
                     )
                 
                 # Store results
@@ -1589,8 +2057,12 @@ def load_and_validate_data(
         required_columns.update({cfdna_ref_col, cfdna_alt_col, model_ref_col, model_alt_col})
         read_columns = [cfdna_ref_col, cfdna_alt_col, model_ref_col, model_alt_col]
         console.print(f"[cyan]Validating cfDNA+model mode with columns: {', '.join(read_columns)}[/cyan]")
+    elif mode == 'cfDNA+model+mGT':
+        required_columns.update({cfdna_ref_col, cfdna_alt_col, model_ref_col, model_alt_col})
+        read_columns = [cfdna_ref_col, cfdna_alt_col, model_ref_col, model_alt_col]
+        console.print(f"[cyan]Validating cfDNA+model+mGT mode with columns: {', '.join(read_columns)}[/cyan]")
     else:
-        raise ValueError(f"Invalid mode: {mode}. Must be one of: cfDNA, cfDNA+WBC, cfDNA+model")
+        raise ValueError(f"Invalid mode: {mode}. Must be one of: cfDNA, cfDNA+WBC, cfDNA+model, cfDNA+model+mGT")
     
     # Check for required columns
     if not required_columns.issubset(df.columns):
@@ -1652,8 +2124,42 @@ def load_and_validate_data(
         
         if len(df) == 0:
             raise ValueError("No SNPs remaining after model depth filtering")
-    elif min_model_depth > 0 and mode != 'cfDNA+model':
-        console.print(f"[yellow]Warning: Model depth filter ignored for mode '{mode}' (only applies to 'cfDNA+model')[/yellow]")
+    elif min_model_depth > 0 and mode not in ['cfDNA+model', 'cfDNA+model+mGT']:
+        console.print(f"[yellow]Warning: Model depth filter ignored for mode '{mode}' (only applies to 'cfDNA+model' modes)[/yellow]")
+    
+    # Calculate maternal reads for cfDNA+model+mGT mode
+    if mode == 'cfDNA+model+mGT':
+        console.print("[cyan]Calculating maternal reads as cfDNA - model reads[/cyan]")
+        
+        # Calculate maternal reads by subtracting model reads from cfDNA reads
+        df[wbc_ref_col] = df[cfdna_ref_col] - df[model_ref_col]
+        df[wbc_alt_col] = df[cfdna_alt_col] - df[model_alt_col]
+        
+        # Handle edge cases where subtraction results in negative values
+        negative_ref = df[wbc_ref_col] < 0
+        negative_alt = df[wbc_alt_col] < 0
+        
+        if negative_ref.any() or negative_alt.any():
+            negative_count = (negative_ref | negative_alt).sum()
+            console.print(f"[yellow]Warning: {negative_count} SNPs have negative maternal reads (model > cfDNA), setting to 0[/yellow]")
+            df.loc[negative_ref, wbc_ref_col] = 0
+            df.loc[negative_alt, wbc_alt_col] = 0
+        
+        # Filter out SNPs where maternal coverage is zero after calculation
+        df['maternal_total_reads'] = df[wbc_ref_col] + df[wbc_alt_col]
+        zero_maternal_coverage = df['maternal_total_reads'] == 0
+        
+        if zero_maternal_coverage.any():
+            console.print(f"[yellow]Warning: Removing {zero_maternal_coverage.sum()} SNPs with zero maternal coverage[/yellow]")
+            df = df[~zero_maternal_coverage]
+        
+        # Clean up temporary column
+        df = df.drop(columns=['maternal_total_reads']).reset_index(drop=True)
+        
+        if len(df) == 0:
+            raise ValueError("No SNPs remaining after calculating maternal reads")
+        
+        console.print(f"[green]Successfully calculated maternal reads for {len(df)} SNPs[/green]")
     
     return df
 
