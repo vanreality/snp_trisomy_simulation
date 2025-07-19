@@ -15,7 +15,8 @@ process BAM_TO_PILEUP {
     
     script:
     // Create symlink commands for each BAM file to avoid name collisions
-    def linkCmds = bamFiles.collectWithIndex { bam, idx ->
+    def bamFilesList = bamFiles as List
+    def linkCmds = bamFilesList.collectWithIndex { bam, idx ->
         "ln -s $bam ${bamNames[idx]}"
     }.join('\n')
 
