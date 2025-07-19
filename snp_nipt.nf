@@ -4,6 +4,7 @@ include { EXTRACT_SNP_FROM_PARQUET } from './modules/local/extract_snp_from_parq
 include { CALCULATE_LR } from './modules/local/calculate_lr/main.nf'
 include { VCF_TO_PILEUP } from './modules/local/vcf_to_pileup/main.nf'
 include { MERGE_LR_OUTPUT } from './modules/local/merge_lr_output/main.nf'
+include { BAM_TO_PILEUP } from './modules/local/bam_to_pileup/main.nf'
 
 workflow {
     // 1. Input parquet processing
@@ -93,6 +94,35 @@ workflow {
             file("${workflow.projectDir}/bin/vcf_to_pileup.py")
         )
         VCF_TO_PILEUP.out.pileup
+            .set { ch_pileup_samplesheet }
+    } else if (params.input_bam_samplesheet) {
+        Channel
+            .fromPath(params.input_bam_samplesheet)
+            .splitCsv(header: true)
+            .map { row -> 
+                tuple(row.sample, row.dataset, file(row.bam))
+            }
+            .group(by: 0)
+            .map { sample, records ->
+                def bams = records.collect { it[2] }
+                def bamNames = records.collect { it -> 
+                    "${it[1]}_${sample}_${it[2].name}"
+                }
+                def meta = [id: sample]
+                return tuple(meta, bams, bamNames)
+            }
+            .set { ch_bam_samplesheet }
+
+        BAM_TO_PILEUP(
+            ch_bam_samplesheet,
+            file(params.fasta),
+            file(params.fasta_index),
+            file(params.known_sites_tsv),
+            file(params.known_sites_bed),
+            file("${workflow.projectDir}/bin/bam_to_pileup.py"),
+            file("${workflow.projectDir}/bin/merge_pileups.py")
+        )
+        BAM_TO_PILEUP.out.pileup
             .set { ch_pileup_samplesheet }
     } else {
         EXTRACT_SNP_FROM_PARQUET(
