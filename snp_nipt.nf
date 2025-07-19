@@ -100,17 +100,13 @@ workflow {
             .fromPath(params.input_bam_samplesheet)
             .splitCsv(header: true)
             .map { row -> 
-                tuple(row.sample, row.dataset, file(row.bam))
+                tuple(row.sample, file(row.bam))
             }
             .groupTuple(by: 0)
-            .map { sample, datasets, bamFiles ->
-                def dsList = datasets.toList()
+            .map { sample, bamFiles ->
                 def bamList = bamFiles.toList()
-                def bamNames = dsList.withIndex().collect { dataset, idx -> 
-                    "${dataset}_${sample}"
-                }
                 def meta = [id: sample]
-                return tuple(meta, bamList, bamNames)
+                return tuple(meta, bamList)
             }
             .set { ch_bam_samplesheet }
 

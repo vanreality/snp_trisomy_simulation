@@ -2,7 +2,7 @@ process BAM_TO_PILEUP {
     tag "$meta.id"
     
     input:
-    tuple val(meta), path(bamFiles, stageAs: "input_bam_?/*"), val(bamNames)
+    tuple val(meta), path(bamFiles, stageAs: "input_?.bam")
     path(fasta)
     path(fasta_index)
     path(known_sites_tsv)
@@ -14,47 +14,39 @@ process BAM_TO_PILEUP {
     tuple val(meta), path("${meta.id}_pileup.tsv.gz"), emit: pileup
     
     script:
-    // Create symlink commands for each BAM file to avoid name collisions
-    def bamList = bamFiles.toList()
-    def linkCmds = bamList.withIndex().collect { bam, idx ->
-        "ln -s ${bam} ${bamNames[idx]}"
-    }.join('\n')
-
-    // For each symlinked BAM, run bcftools mpileup and then a Python processing script
-    def processCmds = bamNames.collect { name ->
-        """
+    """
+    # Process each BAM file
+    for bam in input*.bam; do
+        # Get base name for output files
+        base=\$(basename \$bam .bam)
+        
         # Index the BAM file
-        samtools index $name
+        samtools index \$bam
 
         # Generate BCF via bcftools mpileup and call
         bcftools mpileup \\
           -f ${fasta} \\
           --regions-file ${known_sites_bed} \\
           --annotate AD,DP \\
-          -Ou $name \\
-        | bcftools view -Oz -o ${name}.vcf.gz
+          -Ou \$bam \\
+        | bcftools view -Oz -o \${base}.vcf.gz
 
         # Process the BCF with a Python script to extract desired metrics
         python ${pileup_script} \\
-          --input-vcf ${name}.vcf.gz \\
+          --input-vcf \${base}.vcf.gz \\
           --known-sites ${known_sites_tsv} \\
-          --output ${name}
-        """
-    }.join('\n')
+          --output \${base}_pileup.tsv.gz
+    done
 
-    // Merge all intermediate TSVs and compress final output
-    def mergeCmd = """
-    # Merge individual TSV outputs into a single file
+    # Collect all TSV files for merging
+    tsv_files=()
+    for tsv in input*_pileup.tsv.gz; do
+        tsv_files+=("\$tsv")
+    done
+
+    # Merge all intermediate TSV outputs into final file
     python ${merge_script} \\
-      --inputs "${ bamNames.collect{ it + '_pileup.tsv.gz' }.join(' ') }" \\
+      --inputs "\${tsv_files[@]}" \\
       --output ${meta.id}_pileup.tsv.gz
-    """
-
-    """
-    ${linkCmds}
-
-    ${processCmds}
-
-    ${mergeCmd}
     """
 }
