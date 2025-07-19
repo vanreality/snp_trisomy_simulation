@@ -2,7 +2,7 @@ process BAM_TO_PILEUP {
     tag "$meta.id"
     
     input:
-    tuple val(meta), path(bamFiles), val(bamNames)
+    tuple val(meta), path(bamFiles, stageAs: "input_bam_?/*"), val(bamNames)
     path(fasta)
     path(fasta_index)
     path(known_sites_tsv)
