@@ -104,11 +104,13 @@ workflow {
             }
             .groupTuple(by: 0)
             .map { sample, datasets, bamFiles ->
-                def bamNames = datasets.withIndex().collect { dataset, idx -> 
-                    "${dataset}_${sample}_${bamFiles[idx].name}"
+                def dsList = datasets.toList()
+                def bamList = bamFiles.toList()
+                def bamNames = dsList.withIndex().collect { dataset, idx -> 
+                    "${dataset}_${sample}_${bamList[idx].name}"
                 }
                 def meta = [id: sample]
-                return tuple(meta, bamFiles, bamNames)
+                return tuple(meta, bamList, bamNames)
             }
             .set { ch_bam_samplesheet }
 

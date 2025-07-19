@@ -15,9 +15,9 @@ process BAM_TO_PILEUP {
     
     script:
     // Create symlink commands for each BAM file to avoid name collisions
-    def bamFilesList = bamFiles as List
-    def linkCmds = bamFilesList.collectWithIndex { bam, idx ->
-        "ln -s $bam ${bamNames[idx]}"
+    def bamList = bamFiles.toList()
+    def linkCmds = bamList.withIndex().collect { bam, idx ->
+        "ln -s ${bam} ${bamNames[idx]}"
     }.join('\n')
 
     // For each symlinked BAM, run bcftools mpileup and then a Python processing script
