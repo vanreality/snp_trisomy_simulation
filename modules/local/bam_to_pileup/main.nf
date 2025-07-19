@@ -48,13 +48,10 @@ process BAM_TO_PILEUP {
     """
 
     """
-    // Step 1: Create unique symlinks for BAM files
     ${linkCmds}
 
-    // Step 2: Run pileup and Python processing on each BAM
     ${processCmds}
 
-    // Step 3: Merge and compress results
     ${mergeCmd}
     """
 }
