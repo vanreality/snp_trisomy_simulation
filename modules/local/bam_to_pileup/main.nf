@@ -35,18 +35,12 @@ process BAM_TO_PILEUP {
         python ${pileup_script} \\
           --input-vcf \${base}.vcf.gz \\
           --known-sites ${known_sites_tsv} \\
-          --output \${base}_pileup.tsv.gz
-    done
-
-    # Collect all TSV files for merging
-    tsv_files=()
-    for tsv in input*_pileup.tsv.gz; do
-        tsv_files+=("\$tsv")
+          --output \${base}
     done
 
     # Merge all intermediate TSV outputs into final file
     python ${merge_script} \\
-      --inputs "\${tsv_files[@]}" \\
+      --inputs \$(printf '%q ' input*_pileup.tsv.gz) \\
       --output ${meta.id}_pileup.tsv.gz
     """
 }
