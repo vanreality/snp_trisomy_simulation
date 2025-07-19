@@ -11,7 +11,7 @@ process BAM_TO_PILEUP {
     path(merge_script)
     
     output:
-    tuple val(meta), path("*.tsv.gz"), emit: pileup
+    tuple val(meta), path("${meta.id}_pileup.tsv.gz"), emit: pileup
     
     script:
     // Create symlink commands for each BAM file to avoid name collisions
@@ -38,7 +38,7 @@ process BAM_TO_PILEUP {
         python ${pileup_script} \\
           --input-vcf ${name}.vcf.gz \\
           --known-sites ${known_sites_tsv} \\
-          --output ${name}.tsv
+          --output ${name}
         """
     }.join('\n')
 
@@ -46,7 +46,7 @@ process BAM_TO_PILEUP {
     def mergeCmd = """
     # Merge individual TSV outputs into a single file
     python ${merge_script} \\
-      --inputs "${ bamNames.collect{ it + '.tsv.gz' }.join(' ') }" \\
+      --inputs "${ bamNames.collect{ it + '_pileup.tsv.gz' }.join(' ') }" \\
       --output ${meta.id}_pileup.tsv.gz
     """
 

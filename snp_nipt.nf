@@ -107,7 +107,7 @@ workflow {
                 def dsList = datasets.toList()
                 def bamList = bamFiles.toList()
                 def bamNames = dsList.withIndex().collect { dataset, idx -> 
-                    "${dataset}_${sample}_${bamList[idx].name}"
+                    "${dataset}_${sample}"
                 }
                 def meta = [id: sample]
                 return tuple(meta, bamList, bamNames)
