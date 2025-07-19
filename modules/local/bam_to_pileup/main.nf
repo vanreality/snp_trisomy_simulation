@@ -46,7 +46,7 @@ process BAM_TO_PILEUP {
     def mergeCmd = """
     # Merge individual TSV outputs into a single file
     python ${merge_script} \\
-      --inputs ${ bamNames.collect{ it + '.tsv.gz' }.join(' ') } \\
+      --inputs "${ bamNames.collect{ it + '.tsv.gz' }.join(' ') }" \\
       --output ${meta.id}_pileup.tsv.gz
     """
 
