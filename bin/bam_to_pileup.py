@@ -75,32 +75,32 @@ def extract_reference_alternate_counts(variant_row: pd.Series) -> pd.Series:
         - alternate_count = 34 (A count)
     """
     # Parse comma-separated alternate alleles and depths
-    alternate_alleles_list = variant_row['alternate_alleles_vcf'].split(',')  # e.g. ['A','C','<*>']
-    depth_values = [int(depth) for depth in variant_row['allele_depths'].split(',')]  # e.g. [59,34,1,0]
+    alternate_alleles_list = variant_row['alt_vcf'].split(',')  # e.g. ['A','C','<*>']
+    depth_values = [int(depth) for depth in variant_row['ad'].split(',')]  # e.g. [59,34,1,0]
 
     # Initialize reference count with the first depth value (reference allele)
     reference_count = depth_values[0]
 
     # Handle bisulfite sequencing conversion artifacts:
     # Add T depths to C reference counts (C->T conversion)
-    if variant_row['reference_allele'] == 'C' and 'T' in alternate_alleles_list:
+    if variant_row['ref'] == 'C' and 'T' in alternate_alleles_list:
         t_allele_index = alternate_alleles_list.index('T') + 1  # +1 because first depth is ref
         reference_count += depth_values[t_allele_index]
     
     # Add A depths to G reference counts (G->A conversion)
-    if variant_row['reference_allele'] == 'G' and 'A' in alternate_alleles_list:
+    if variant_row['ref'] == 'G' and 'A' in alternate_alleles_list:
         a_allele_index = alternate_alleles_list.index('A') + 1  # +1 because first depth is ref
         reference_count += depth_values[a_allele_index]
 
     # Extract depth for the target alternate allele
     alternate_count = 0
-    if variant_row['alternate_allele_target'] in alternate_alleles_list:
-        target_allele_index = alternate_alleles_list.index(variant_row['alternate_allele_target']) + 1
+    if variant_row['alt_target'] in alternate_alleles_list:
+        target_allele_index = alternate_alleles_list.index(variant_row['alt_target']) + 1
         alternate_count = depth_values[target_allele_index]
 
     return pd.Series({
-        'reference_count': reference_count,
-        'alternate_count': alternate_count
+        'cfDNA_ref_reads': reference_count,
+        'cfDNA_alt_reads': alternate_count
     })
 
 
@@ -133,14 +133,14 @@ def load_vcf_data(vcf_file_path: Path, progress: Progress, task_id: TaskID) -> p
             compression='gzip' if vcf_file_path.suffix == '.gz' else None,
             comment='#', 
             usecols=[0, 1, 3, 4, 9], 
-            names=['chromosome', 'position', 'reference_allele', 'alternate_alleles_vcf', 'sample_info']
+            names=['chr', 'pos', 'ref', 'alt_vcf', 'sample_info']
         )
         
         if vcf_data.empty:
             raise pd.errors.EmptyDataError("VCF file contains no data")
         
         # Extract allele depths (AD) from the sample info field (last colon-separated value)
-        vcf_data['allele_depths'] = vcf_data['sample_info'].apply(lambda x: x.split(':')[-1])
+        vcf_data['ad'] = vcf_data['sample_info'].apply(lambda x: x.split(':')[-1])
         
         progress.update(task_id, advance=50)
         console.print(f"[green]✓[/green] Loaded {len(vcf_data):,} variants from VCF file")
@@ -179,7 +179,7 @@ def load_known_sites_data(known_sites_file_path: Path, progress: Progress, task_
             known_sites_file_path, 
             sep='\t', 
             usecols=[0, 1, 3, 4, 7], 
-            names=['chromosome', 'position', 'reference_allele', 'alternate_allele_target', 'info_field'], 
+            names=['chr', 'pos', 'ref', 'alt_target', 'info_field'], 
             comment='#'
         )
         
@@ -187,7 +187,7 @@ def load_known_sites_data(known_sites_file_path: Path, progress: Progress, task_
             raise pd.errors.EmptyDataError("Known sites file contains no data")
         
         # Extract allele frequencies from info field
-        known_sites_data['allele_frequency'] = known_sites_data['info_field'].apply(extract_allele_frequency)
+        known_sites_data['af'] = known_sites_data['info_field'].apply(extract_allele_frequency)
         
         progress.update(task_id, advance=50)
         console.print(f"[green]✓[/green] Loaded {len(known_sites_data):,} known variant sites")
@@ -222,7 +222,7 @@ def merge_variant_data(vcf_data: pd.DataFrame, known_sites_data: pd.DataFrame,
     merged_variants = pd.merge(
         vcf_data, 
         known_sites_data, 
-        on=['chromosome', 'position', 'reference_allele']
+        on=['chr', 'pos', 'ref']
     )
     
     if merged_variants.empty:
@@ -253,17 +253,11 @@ def process_pileup_data(merged_variants: pd.DataFrame, progress: Progress, task_
     
     # Combine position information with count data
     pileup_result = pd.concat([
-        merged_variants[['chromosome', 'position', 'reference_allele', 'alternate_allele_target']].rename(
-            columns={'alternate_allele_target': 'alternate_allele'}
+        merged_variants[['chr', 'pos', 'ref', 'alt_target', 'af']].rename(
+            columns={'alt_target': 'alt'}
         ),
         allele_counts
     ], axis=1)
-    
-    # Rename columns to match expected output format
-    pileup_result = pileup_result.rename(columns={
-        'reference_count': 'cfDNA_ref_reads',
-        'alternate_count': 'cfDNA_alt_reads'
-    })
     
     # Calculate total sequencing depth
     pileup_result['current_depth'] = pileup_result['cfDNA_ref_reads'] + pileup_result['cfDNA_alt_reads']
