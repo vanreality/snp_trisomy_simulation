@@ -40,7 +40,7 @@ process BAM_TO_PILEUP {
 
     # Merge all intermediate TSV outputs into final file
     python ${merge_script} \\
-      --inputs \$(printf '%q ' input*_pileup.tsv.gz) \\
+      --inputs "\$(ls input*_pileup.tsv.gz | tr '\\n' ' ')" \\
       --output ${meta.id}_pileup.tsv.gz
     """
 }
