@@ -23,6 +23,9 @@ process BAM_TO_PILEUP {
     // For each symlinked BAM, run bcftools mpileup and then a Python processing script
     def processCmds = bamNames.collect { name ->
         """
+        # Index the BAM file
+        samtools index $name
+
         # Generate BCF via bcftools mpileup and call
         bcftools mpileup \\
           -f ${fasta} \\
