@@ -102,7 +102,7 @@ workflow {
             .map { row -> 
                 tuple(row.sample, row.dataset, file(row.bam))
             }
-            .group(by: 0)
+            .groupTuple(by: 0)
             .map { sample, records ->
                 def bams = records.collect { it[2] }
                 def bamNames = records.collect { it -> 
