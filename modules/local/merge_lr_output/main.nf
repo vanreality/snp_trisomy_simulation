@@ -9,10 +9,12 @@ process MERGE_LR_OUTPUT {
     
     script:
     def args = task.ext.args ?: ''
-    def input_files_str = input_files.join(' ')
     """
+    # Create file list to avoid "Argument list too long" error
+    echo "${input_files.join('\n')}" > input_files_list.txt
+    
     python3 ${script} \\
-        --input-files "${input_files_str}" \\
+        --input-files-list input_files_list.txt \\
         --output merged_lr_output.tsv.gz \\
         ${args} \\
         > merge_lr_output.log 2>&1

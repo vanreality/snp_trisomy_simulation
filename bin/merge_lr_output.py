@@ -281,9 +281,13 @@ def display_summary(df: pd.DataFrame) -> None:
 
 @click.command()
 @click.option(
+    '--input-files-list',
+    type=click.Path(exists=True, path_type=Path),
+    help='Path to a file containing list of lr_calculator output files (one per line)'
+)
+@click.option(
     '--input-files',
-    required=True,
-    help='Space-separated list of lr_calculator output files to merge'
+    help='Space-separated list of lr_calculator output files to merge (deprecated for large file lists)'
 )
 @click.option(
     '--output', '-o',
@@ -301,7 +305,7 @@ def display_summary(df: pd.DataFrame) -> None:
     is_flag=True,
     help='Overwrite output file if it already exists'
 )
-def main(input_files: str, output: Path, verbose: bool, force: bool) -> None:
+def main(input_files_list: Optional[Path], input_files: Optional[str], output: Path, verbose: bool, force: bool) -> None:
     """
     Merge Likelihood Ratio Calculator Output Files.
     
@@ -315,6 +319,9 @@ def main(input_files: str, output: Path, verbose: bool, force: bool) -> None:
     
     The script performs comprehensive validation and provides detailed progress
     reporting and error handling.
+    
+    For large numbers of files (>1000), use --input-files-list to avoid 
+    "Argument list too long" errors.
     """
     try:
         # Check if output file exists and handle accordingly
@@ -323,8 +330,20 @@ def main(input_files: str, output: Path, verbose: bool, force: bool) -> None:
             console.print("[yellow]Use --force to overwrite existing output[/yellow]")
             sys.exit(1)
         
-        # Parse input file paths
-        file_paths = [Path(f.strip()) for f in input_files.split()]
+        # Parse input file paths - prioritize file list over command line args
+        if input_files_list:
+            console.print(f"[cyan]Reading file list from: {input_files_list}[/cyan]")
+            try:
+                with open(input_files_list, 'r') as f:
+                    file_paths = [Path(line.strip()) for line in f if line.strip()]
+            except Exception as e:
+                console.print(f"[red]✗ Failed to read file list: {str(e)}[/red]")
+                sys.exit(1)
+        elif input_files:
+            file_paths = [Path(f.strip()) for f in input_files.split()]
+        else:
+            console.print("[red]✗ Must provide either --input-files-list or --input-files[/red]")
+            sys.exit(1)
         
         # Validate input files
         valid_files = []
@@ -339,8 +358,10 @@ def main(input_files: str, output: Path, verbose: bool, force: bool) -> None:
             sys.exit(1)
         
         # Display startup information
+        input_method = "File list" if input_files_list else "Command line"
         console.print(Panel.fit(
             f"[bold green]Log Likelihood Ratio Output Merger[/bold green]\n"
+            f"Input Method: {input_method}\n"
             f"Input Files: {len(valid_files)}\n"
             f"Output: {output}\n"
             f"Verbose: {verbose}\n"
