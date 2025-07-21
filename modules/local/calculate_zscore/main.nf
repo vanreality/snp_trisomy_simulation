@@ -7,7 +7,7 @@ process CALCULATE_ZSCORE {
     path(script)
     
     output:
-    path("*.tsv"), emit: zscore_results
+    path("${meta.id}_zscore.tsv"), emit: zscore_results
     path("${meta.id}.log"), emit: log_file
     
     script:
@@ -17,7 +17,7 @@ process CALCULATE_ZSCORE {
         --input-pileup ${snp_pileup_file} \\
         --maternal-genotype ${maternal_genotype_file} \\
         --fetal-genotype ${fetal_genotype_file} \\
-        --reference-file ${reference_file} \\
+        --reference ${reference_file} \\
         --output ${meta.id} \\
         ${args} \\
         > ${meta.id}.log 2>&1

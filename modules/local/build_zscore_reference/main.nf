@@ -8,7 +8,7 @@ process BUILD_ZSCORE_REFERENCE {
     path(script)
     
     output:
-    path("*.tsv"), emit: zscore_reference
+    path("zscore_reference.tsv"), emit: zscore_reference
     
     script:
     def args = task.ext.args ?: ''
