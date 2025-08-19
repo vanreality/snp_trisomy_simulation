@@ -135,24 +135,27 @@ workflow {
             .set { ch_pileup_samplesheet }
     }
     
-    // 3. LR calculation
-    // ====================================
 
-    CALCULATE_LR(
-        ch_pileup_samplesheet,
-        params.lr_mode,
-        params.min_raw_depth,
-        params.min_model_depth,
-        file("${workflow.projectDir}/bin/lr_calculator.py")
-    )
+    if (params.run_lr_calculator) {
+        // 3. LR calculation
+        // ====================================
+        CALCULATE_LR(
+            ch_pileup_samplesheet,
+            params.lr_mode,
+            params.min_raw_depth,
+            params.min_model_depth,
+            file("${workflow.projectDir}/bin/lr_calculator.py")
+        )
 
-    // 4. Merge LR output
-    // ====================================
+        // 4. Merge LR output
+        // ====================================
+        MERGE_LR_OUTPUT(
+            CALCULATE_LR.out.lr_results.collect(),
+            file("${workflow.projectDir}/bin/merge_lr_output.py")
+        )
+    }
 
-    MERGE_LR_OUTPUT(
-        CALCULATE_LR.out.lr_results.collect(),
-        file("${workflow.projectDir}/bin/merge_lr_output.py")
-    )
+
 }
 
 
