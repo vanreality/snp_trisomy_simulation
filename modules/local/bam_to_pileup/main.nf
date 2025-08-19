@@ -1,4 +1,7 @@
 process BAM_TO_PILEUP {
+    errorStrategy 'ignore'
+    maxErrors 10
+    maxRetries 1
     tag "$meta.id"
     
     input:
