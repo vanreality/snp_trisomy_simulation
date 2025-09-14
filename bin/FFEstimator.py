@@ -1,0 +1,894 @@
+#!/usr/bin/env python3
+"""
+Fetal Fraction Estimator for Aneuploidy Detection
+
+This module provides the FFEstimator class for estimating fetal fraction from 
+cell-free DNA (cfDNA) sequencing data using different analysis modes.
+"""
+
+import numpy as np
+import pandas as pd
+from multiprocessing import Pool, cpu_count
+import math
+from typing import Dict, Tuple
+from rich.console import Console
+from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
+
+# Initialize rich console for beautiful output
+console = Console()
+
+
+# Global helper functions for multiprocessing (need to be at module level)
+def _log_binomial_coeff_global(n: int, k: int) -> float:
+    """Compute log(C(n,k)) using log-gamma function for numerical stability."""
+    if k < 0 or k > n or n < 0:
+        return float('-inf')
+    if k == 0 or k == n:
+        return 0.0
+    return (math.lgamma(n + 1) - math.lgamma(k + 1) - math.lgamma(n - k + 1))
+
+
+def _log_binomial_pmf_global(k: int, n: int, p: float) -> float:
+    """Compute log-probability mass function of Binomial(n, p) at k."""
+    if n < 0 or k < 0 or k > n:
+        return float('-inf')
+    if p <= 0.0:
+        return 0.0 if k == 0 else float('-inf')
+    if p >= 1.0:
+        return 0.0 if k == n else float('-inf')
+    
+    log_coeff = _log_binomial_coeff_global(n, k)
+    return log_coeff + k * math.log(p) + (n - k) * math.log(1 - p)
+
+
+def _log_sum_exp_global(log_values: np.ndarray) -> float:
+    """Compute log(sum(exp(x_i))) for numerical stability."""
+    if len(log_values) == 0:
+        return float('-inf')
+    max_val = np.max(log_values)
+    if max_val == float('-inf'):
+        return float('-inf')
+    return max_val + math.log(np.sum(np.exp(log_values - max_val)))
+
+
+def _compute_ff_likelihood_chunk(args: Tuple) -> Dict[float, float]:
+    """
+    Worker function to compute log-likelihood for a chunk of fetal fraction values.
+    
+    This function processes a subset of FF values in parallel to speed up computation.
+    
+    Args:
+        args: Tuple containing (f_values_chunk, shared_data)
+            - f_values_chunk: Array of FF values to process
+            - shared_data: Tuple of (p_arr, n_arr, alt_arr, log_prior_G, maternal_alt_frac, fetal_alt_frac)
+    
+    Returns:
+        Dictionary mapping FF values to their computed log-likelihoods
+    """
+    f_values_chunk, shared_data = args
+    p_arr, n_arr, alt_arr, log_prior_G, maternal_alt_frac, fetal_alt_frac = shared_data
+    
+    chunk_results = {}
+    num_snps = len(p_arr)
+    
+    for FF in f_values_chunk:
+        total_log_lik = 0.0
+        
+        # Process each SNP for this FF value
+        for i in range(num_snps):
+            n_i = n_arr[i]
+            k_i = alt_arr[i]
+            
+            # Compute mixture probabilities for all genotypes
+            mu_values = (1 - FF) * maternal_alt_frac + FF * fetal_alt_frac[i, :]
+            
+            # Compute log probabilities for each genotype
+            log_probs = np.zeros(3)
+            for g in range(3):
+                mu_g = mu_values[g]
+                log_pmf = _log_binomial_pmf_global(k_i, n_i, mu_g)
+                log_probs[g] = log_prior_G[i, g] + log_pmf
+            
+            # Use log-sum-exp to compute log-likelihood for this SNP
+            log_L_i = _log_sum_exp_global(log_probs)
+            total_log_lik += log_L_i
+        
+        chunk_results[FF] = total_log_lik
+    
+    return chunk_results
+
+
+class FFEstimator:
+    """
+    Fetal Fraction Estimator class for analyzing cfDNA sequencing data.
+    
+    This class provides methods to estimate fetal fraction from maternal plasma
+    samples using different analysis modes (cfDNA-only or cfDNA+WBC).
+    """
+    
+    def __init__(self, mode: str = 'cfDNA'):
+        """
+        Initialize the Fetal Fraction Estimator.
+        
+        Args:
+            mode (str): Analysis mode, options: 'cfDNA', 'cfDNA+WBC', 'cfDNA+model', or 'cfDNA+model+mGT'. 
+                       'cfDNA' uses only cell-free DNA reads.
+                       'cfDNA+WBC' incorporates maternal white blood cell genotyping.
+                       'cfDNA+model' uses modeled fetal reads for estimation.
+                       'cfDNA+model+mGT' uses modeled reads with maternal genotyping.
+        
+        Raises:
+            ValueError: If mode is not one of the supported modes.
+        """
+        valid_modes = ['cfDNA', 'cfDNA+WBC', 'cfDNA+model', 'cfDNA+model+mGT']
+        if mode not in valid_modes:
+            raise ValueError(f"Invalid mode: {mode}. Must be one of: {valid_modes}")
+        
+        self.mode = mode
+        console.print(f"[green]FFEstimator initialized in {mode} mode[/green]")
+
+        self.allelic_bias = 0.47747748/(1-0.47747748)
+    
+    def estimate(
+        self,
+        background_chr_df: pd.DataFrame, 
+        f_min: float = 0.001, 
+        f_max: float = 0.5, 
+        f_step: float = 0.001,
+        ncpus: int = cpu_count(),
+        ref_col: str = 'cfDNA_ref_reads',
+        alt_col: str = 'cfDNA_alt_reads',
+        maternal_ref_col: str = 'maternal_ref_reads',
+        maternal_alt_col: str = 'maternal_alt_reads'
+    ) -> Tuple[float, Dict[float, float]]:
+        """
+        Estimate fetal fraction using the configured analysis mode.
+        
+        Args:
+            background_chr_df (pd.DataFrame): DataFrame containing SNP information.
+            f_min (float, optional): Minimum fetal fraction to search. Defaults to 0.001.
+            f_max (float, optional): Maximum fetal fraction to search. Defaults to 0.5.
+            f_step (float, optional): Step size for grid search. Defaults to 0.001.
+            ncpus (int, optional): Number of CPU cores to use. Defaults to cpu_count().
+            ref_col (str, optional): Column name for reference reads. Defaults to 'cfDNA_ref_reads'.
+            alt_col (str, optional): Column name for alternative reads. Defaults to 'cfDNA_alt_reads'.
+            maternal_ref_col (str, optional): Column name for maternal WBC reference reads.
+            maternal_alt_col (str, optional): Column name for maternal WBC alternative reads.
+        
+        Returns:
+            Tuple[float, Dict[float, float]]: A tuple containing:
+                - best_ff: Estimated fetal fraction that maximizes log-likelihood
+                - log_likelihoods: Dictionary mapping FF values to their log-likelihoods
+        
+        Raises:
+            ValueError: If input data is invalid or analysis mode is unsupported.
+        """
+        if self.mode == 'cfDNA':
+            return self._estimate_fetal_fraction_cfdna(
+                background_chr_df=background_chr_df,
+                f_min=f_min,
+                f_max=f_max,
+                f_step=f_step,
+                ncpus=ncpus,
+                ref_col=ref_col,
+                alt_col=alt_col
+            )
+        elif self.mode == 'cfDNA+WBC':
+            return self._estimate_fetal_fraction_with_maternal_reads(
+                background_chr_df=background_chr_df,
+                f_min=f_min,
+                f_max=f_max,
+                f_step=f_step,
+                ncpus=ncpus,
+                ref_col=ref_col,
+                alt_col=alt_col,
+                maternal_ref_col=maternal_ref_col,
+                maternal_alt_col=maternal_alt_col
+            )
+        elif self.mode in ['cfDNA+model', 'cfDNA+model+mGT']:
+            # Both cfDNA+model modes use model reads for fetal fraction estimation
+            # Note: For cfDNA+model+mGT, maternal genotyping is only used in LLR calculation
+            return self._estimate_fetal_fraction_cfdna(
+                background_chr_df=background_chr_df,
+                f_min=f_min,
+                f_max=f_max,
+                f_step=f_step,
+                ncpus=ncpus,
+                ref_col=ref_col,
+                alt_col=alt_col
+            )
+        else:
+            raise ValueError(f"Unsupported mode: {self.mode}")
+    
+    def _estimate_fetal_fraction_cfdna(
+        self,
+        background_chr_df: pd.DataFrame, 
+        f_min: float = 0.001, 
+        f_max: float = 0.5, 
+        f_step: float = 0.001,
+        ncpus: int = cpu_count(),
+        ref_col: str = 'cfDNA_ref_reads',
+        alt_col: str = 'cfDNA_alt_reads'
+    ) -> Tuple[float, Dict[float, float]]:
+        """
+        Estimate fetal fraction (FF) from maternal cfDNA SNP read counts using maximum likelihood estimation.
+        
+        This function implements a mixture model approach where:
+        - Maternal genotypes follow Hardy-Weinberg equilibrium
+        - Fetal genotypes depend on maternal and paternal contributions
+        - Observed alt-allele fractions are modeled as a mixture of maternal and fetal contributions
+        
+        The likelihood is computed by marginalizing over all possible maternal genotype combinations
+        and selecting the fetal fraction that maximizes the total log-likelihood across all SNPs.
+        
+        Args:
+            background_chr_df (pd.DataFrame): DataFrame containing SNP information with columns:
+                - 'chr': chromosome identifier (string or int)
+                - 'pos': genomic position (int)
+                - 'af': population allele frequency (float in [0,1])
+                - 'cfDNA_ref_reads': number of reference allele reads (int >= 0)
+                - 'cfDNA_alt_reads': number of alternative allele reads (int >= 0)
+            f_min (float, optional): Minimum fetal fraction to search. Defaults to 0.001.
+            f_max (float, optional): Maximum fetal fraction to search. Defaults to 0.5.
+            f_step (float, optional): Step size for grid search. Defaults to 0.001.
+            ncpus (int, optional): Number of CPU cores to use. Defaults to cpu_count().
+            ref_col (str, optional): Column name for reference reads. Defaults to 'cfDNA_ref_reads'.
+            alt_col (str, optional): Column name for alternative reads. Defaults to 'cfDNA_alt_reads'.
+        
+        Returns:
+            Tuple[float, Dict[float, float]]: A tuple containing:
+                - best_ff: Estimated fetal fraction that maximizes log-likelihood
+                - log_likelihoods: Dictionary mapping FF values to their log-likelihoods
+        
+        Raises:
+            ValueError: If input DataFrame is missing required columns or contains invalid data
+            ValueError: If search parameters are invalid (f_min >= f_max, negative values, etc.)
+        """
+        # Input validation
+        required_columns = {'chr', 'pos', 'af', ref_col, alt_col}
+        if not required_columns.issubset(background_chr_df.columns):
+            missing_cols = required_columns - set(background_chr_df.columns)
+            raise ValueError(f"Missing required columns: {missing_cols}")
+        
+        if not (0 <= f_min < f_max <= 1):
+            raise ValueError(f"Invalid search range: f_min={f_min}, f_max={f_max}")
+        
+        if f_step <= 0:
+            raise ValueError(f"Step size must be positive: f_step={f_step}")
+        
+        if len(background_chr_df) == 0:
+            raise ValueError("Input DataFrame is empty")
+        
+        # Data preprocessing and validation
+        df_clean = background_chr_df.copy()
+        
+        # Validate allele frequencies
+        invalid_af = (df_clean['af'] < 0) | (df_clean['af'] > 1)
+        if invalid_af.any():
+            console.print(f"[yellow]Warning: Removing {invalid_af.sum()} SNPs with invalid allele frequencies[/yellow]")
+            df_clean = df_clean[~invalid_af]
+        
+        # Validate read counts
+        invalid_reads = (df_clean[ref_col] < 0) | (df_clean[alt_col] < 0)
+        if invalid_reads.any():
+            console.print(f"[yellow]Warning: Removing {invalid_reads.sum()} SNPs with negative read counts[/yellow]")
+            df_clean = df_clean[~invalid_reads]
+        
+        # Filter out SNPs with zero coverage
+        df_clean['total_reads'] = df_clean[ref_col] + df_clean[alt_col]
+        zero_coverage = df_clean['total_reads'] == 0
+        if zero_coverage.any():
+            console.print(f"[yellow]Warning: Removing {zero_coverage.sum()} SNPs with zero coverage[/yellow]")
+            df_clean = df_clean[df_clean['total_reads'] > 0]
+        
+        if len(df_clean) == 0:
+            raise ValueError("No valid SNPs remaining after filtering")
+        
+        # Convert to numpy arrays for performance
+        p_arr = df_clean['af'].to_numpy(dtype=np.float64)
+        ref_arr = df_clean[ref_col].to_numpy(dtype=np.int32)
+        alt_arr = df_clean[alt_col].to_numpy(dtype=np.int32)
+        n_arr = ref_arr + alt_arr
+        
+        num_snps = len(p_arr)
+        console.print(f"[green]Processing {num_snps} SNPs for fetal fraction estimation[/green]")
+        
+        # Pre-compute genotype-specific parameters
+        # Maternal alt-allele fractions: 0/0 -> 0.0, 0/1 -> 0.5, 1/1 -> 1.0
+        maternal_alt_frac = np.array([0.0, 0.5, 1.0], dtype=np.float64)
+        
+        # Hardy-Weinberg priors and fetal alt-allele fractions
+        prior_G = np.zeros((num_snps, 3), dtype=np.float64)
+        fetal_alt_frac = np.zeros((num_snps, 3), dtype=np.float64)
+        
+        # Vectorized computation of priors and fetal fractions
+        prior_G[:, 0] = (1 - p_arr) ** 2        # P(mother = 0/0)
+        prior_G[:, 1] = 2 * p_arr * (1 - p_arr)  # P(mother = 0/1)
+        prior_G[:, 2] = p_arr ** 2              # P(mother = 1/1)
+        
+        fetal_alt_frac[:, 0] = 0.5 * p_arr               # E[fetal_alt | mother=0/0]
+        fetal_alt_frac[:, 1] = 0.25 + 0.5 * p_arr       # E[fetal_alt | mother=0/1]
+        fetal_alt_frac[:, 2] = 0.5 + 0.5 * p_arr        # E[fetal_alt | mother=1/1]
+        
+        # Compute log priors for numerical stability
+        with np.errstate(divide='ignore'):
+            log_prior_G = np.log(prior_G)
+        
+        # Grid search over fetal fraction values
+        f_values = np.arange(f_min, f_max + f_step, f_step)
+        log_likelihoods = {}
+        
+        console.print(f"[cyan]Using {ncpus} CPU cores for parallel processing[/cyan]")
+        
+        # Prepare shared data for worker processes
+        shared_data = (p_arr, n_arr, alt_arr, log_prior_G, maternal_alt_frac, fetal_alt_frac)
+        
+        # Split FF values into chunks for parallel processing
+        chunk_size = max(1, len(f_values) // ncpus)
+        f_value_chunks = [f_values[i:i + chunk_size] for i in range(0, len(f_values), chunk_size)]
+        
+        # Prepare arguments for worker processes
+        worker_args = [(chunk, shared_data) for chunk in f_value_chunks]
+        
+        # Progress bar for fetal fraction estimation
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeElapsedColumn(),
+            console=console
+        ) as progress:
+            task = progress.add_task("Estimating fetal fraction...", total=len(f_value_chunks))
+            
+            # Use multiprocessing for parallel computation
+            if ncpus == 1:
+                # Single-threaded execution for debugging or small datasets
+                for args in worker_args:
+                    chunk_results = _compute_ff_likelihood_chunk(args)
+                    log_likelihoods.update(chunk_results)
+                    progress.advance(task)
+            else:
+                # Multi-threaded execution
+                with Pool(processes=ncpus) as pool:
+                    chunk_results_list = []
+                    
+                    # Submit all jobs
+                    async_results = [pool.apply_async(_compute_ff_likelihood_chunk, (args,)) for args in worker_args]
+                    
+                    # Collect results as they complete
+                    for async_result in async_results:
+                        chunk_results = async_result.get()
+                        log_likelihoods.update(chunk_results)
+                        progress.advance(task)
+        
+        # Find the fetal fraction with maximum likelihood
+        best_ff = max(log_likelihoods, key=log_likelihoods.get)
+        
+        console.print(f"[green]✓ Estimated fetal fraction: {best_ff:.3f}[/green]")
+        
+        return best_ff, log_likelihoods
+
+    def _estimate_fetal_fraction_with_maternal_reads(
+        self,
+        background_chr_df: pd.DataFrame,
+        f_min: float = 0.001,
+        f_max: float = 0.5,
+        f_step: float = 0.001,
+        ncpus: int = cpu_count(),
+        ref_col: str = 'cfDNA_ref_reads',
+        alt_col: str = 'cfDNA_alt_reads',
+        maternal_ref_col: str = 'maternal_ref_reads',
+        maternal_alt_col: str = 'maternal_alt_reads'
+    ) -> Tuple[float, Dict[float, float]]:
+        """
+        Estimate fetal fraction (FF) from maternal cfDNA SNP read counts using maximum likelihood.
+        Incorporates maternal WBC genotyping to define prior maternal genotypes before computing
+        the mixture likelihood over fetal fraction.
+
+        Args:
+            background_chr_df (pd.DataFrame): DataFrame containing SNP data with columns:
+                - 'chr', 'pos', 'af', cfDNA ref and alt read counts, and maternal WBC ref/alt reads
+            f_min (float): Minimum fetal fraction to search.
+            f_max (float): Maximum fetal fraction to search.
+            f_step (float): Step size for grid search.
+            ncpus (int): Number of CPU cores for parallel processing.
+            ref_col (str): Column name for cfDNA reference reads.
+            alt_col (str): Column name for cfDNA alternative reads.
+            maternal_ref_col (str): Column name for maternal WBC reference reads.
+            maternal_alt_col (str): Column name for maternal WBC alternative reads.
+
+        Returns:
+            best_ff (float): Estimated fetal fraction.
+            log_likelihoods (Dict[float, float]): Mapping of FF values to log-likelihoods.
+        """
+        # Input validation
+        required_columns = {'chr', 'pos', 'af', ref_col, alt_col, maternal_ref_col, maternal_alt_col}
+        if not required_columns.issubset(background_chr_df.columns):
+            missing = required_columns - set(background_chr_df.columns)
+            raise ValueError(f"Missing required columns: {missing}")
+        if not (0 <= f_min < f_max <= 1):
+            raise ValueError(f"Invalid fetal fraction range: [{f_min}, {f_max}]")
+        if f_step <= 0:
+            raise ValueError(f"Step size must be positive: {f_step}")
+        if background_chr_df.empty:
+            raise ValueError("Input DataFrame is empty")
+
+        # Copy and clean data
+        df = background_chr_df.copy()
+        # Filter invalid allele frequencies
+        bad_af = (df['af'] < 0) | (df['af'] > 1)
+        if bad_af.any():
+            console.print(f"[yellow]Warning: Removing {bad_af.sum()} SNPs with invalid AF[/yellow]")
+            df = df[~bad_af]
+        # Filter invalid read counts
+        bad_reads = (df[ref_col] < 0) | (df[alt_col] < 0)
+        if bad_reads.any():
+            console.print(f"[yellow]Warning: Removing {bad_reads.sum()} SNPs with negative cfDNA reads[/yellow]")
+            df = df[~bad_reads]
+        # Remove zero-coverage cfDNA SNPs
+        df['total_cfDNA'] = df[ref_col] + df[alt_col]
+        zero_cov = df['total_cfDNA'] == 0
+        if zero_cov.any():
+            console.print(f"[yellow]Warning: Removing {zero_cov.sum()} SNPs with zero cfDNA coverage[/yellow]")
+            df = df[df['total_cfDNA'] > 0]
+        if df.empty:
+            raise ValueError("No valid SNPs after filtering")
+
+        # Extract arrays
+        p_arr = df['af'].to_numpy(dtype=np.float64)
+        ref_arr = df[ref_col].to_numpy(dtype=np.int32)
+        alt_arr = df[alt_col].to_numpy(dtype=np.int32)
+        n_arr = ref_arr + alt_arr
+        num_snps = len(p_arr)
+        console.print(f"[green]Processing {num_snps} SNPs...[/green]")
+
+        # Maternal WBC genotyping: derive genotype at each SNP by maximum-likelihood
+        m_ref = df[maternal_ref_col].to_numpy(dtype=np.int32)
+        m_alt = df[maternal_alt_col].to_numpy(dtype=np.int32)
+        m_n = m_ref + m_alt
+        # Possible maternal alt allele fractions for genotypes 0/0, 0/1, 1/1
+        maternal_alt_frac = np.array([0.0, 0.5, 1.0], dtype=np.float64)
+        # Compute log-likelihoods of maternal counts under each genotype
+        maternal_loglik = np.zeros((num_snps, 3), dtype=np.float64)
+        for g in range(3):
+            # Vectorized per-SNP log binomial
+            maternal_loglik[:, g] = [
+                _log_binomial_pmf_global(a, n, maternal_alt_frac[g])
+                for a, n in zip(m_alt, m_n)
+            ]
+        # Assign maternal genotype as the one with highest log-likelihood
+        maternal_gt = np.argmax(maternal_loglik, axis=1)
+        # Build one-hot prior matrix from maternal calls
+        prior_G = np.zeros((num_snps, 3), dtype=np.float64)
+        prior_G[np.arange(num_snps), maternal_gt] = 1.0
+        # Log-priors (0 for called genotype, -inf elsewhere)
+        with np.errstate(divide='ignore'):
+            log_prior_G = np.log(prior_G)
+
+        # Compute expected fetal alt fractions conditional on maternal genotype
+        # E[fetal_alt_frac | maternal genotype]
+        fetal_alt_frac = np.zeros((num_snps, 3), dtype=np.float64)
+        # Based on population AF p_arr
+        fetal_alt_frac[:, 0] = 0.5 * p_arr             # mother 0/0
+        fetal_alt_frac[:, 1] = 0.25 + 0.5 * p_arr       # mother 0/1
+        fetal_alt_frac[:, 2] = 0.5 + 0.5 * p_arr        # mother 1/1
+
+        # Prepare grid of fetal fractions to evaluate
+        f_values = np.arange(f_min, f_max + f_step, f_step)
+        log_likelihoods: Dict[float, float] = {}
+        console.print(f"[cyan]Using {ncpus} CPU cores for grid search from {f_min} to {f_max}[/cyan]")
+
+        # Shared data tuple
+        shared_data = (p_arr, n_arr, alt_arr, log_prior_G, maternal_alt_frac, fetal_alt_frac)
+        
+        # Split FF values into chunks for parallel processing
+        chunk_size = max(1, len(f_values) // ncpus)
+        f_value_chunks = [f_values[i:i + chunk_size] for i in range(0, len(f_values), chunk_size)]
+        
+        # Prepare arguments for worker processes
+        worker_args = [(chunk, shared_data) for chunk in f_value_chunks]
+
+        # Progress bar
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeElapsedColumn(),
+            console=console
+        ) as progress:
+            task = progress.add_task("Estimating fetal fraction...", total=len(f_value_chunks))
+            if ncpus == 1:
+                for args in worker_args:
+                    results = _compute_ff_likelihood_chunk(args)
+                    log_likelihoods.update(results)
+                    progress.advance(task)
+            else:
+                with Pool(processes=ncpus) as pool:
+                    asyncs = [pool.apply_async(_compute_ff_likelihood_chunk, (args,)) for args in worker_args]
+                    for a in asyncs:
+                        res = a.get()
+                        log_likelihoods.update(res)
+                        progress.advance(task)
+
+        # Select best FF
+        best_ff = max(log_likelihoods, key=log_likelihoods.get)
+        console.print(f"[green]✓ Estimated fetal fraction: {best_ff:.3f}[/green]")
+        return best_ff, log_likelihoods
+
+
+def load_and_validate_data(
+    input_path, 
+    mode: str = 'cfDNA',
+    cfdna_ref_col: str = 'cfDNA_ref_reads',
+    cfdna_alt_col: str = 'cfDNA_alt_reads',
+    wbc_ref_col: str = 'maternal_ref_reads',
+    wbc_alt_col: str = 'maternal_alt_reads',
+    model_ref_col: str = 'fetal_ref_reads_from_model',
+    model_alt_col: str = 'fetal_alt_reads_from_model',
+    min_raw_depth: int = 0,
+    min_model_depth: int = 0
+) -> pd.DataFrame:
+    """
+    Load and validate input SNP data from TSV.GZ file.
+    
+    This function validates the presence of required columns based on the analysis mode
+    and performs data type validation and cleaning. It also applies depth filters.
+    
+    Args:
+        input_path: Path to input file
+        mode (str): Analysis mode ('cfDNA', 'cfDNA+WBC', or 'cfDNA+model')
+        cfdna_ref_col (str): Column name for cfDNA reference reads
+        cfdna_alt_col (str): Column name for cfDNA alternative reads
+        wbc_ref_col (str): Column name for maternal WBC reference reads
+        wbc_alt_col (str): Column name for maternal WBC alternative reads
+        model_ref_col (str): Column name for modeled fetal reference reads
+        model_alt_col (str): Column name for modeled fetal alternative reads
+        min_raw_depth (int): Minimum depth for cfDNA reads (default: 0)
+        min_model_depth (int): Minimum depth for modeled reads (default: 0)
+    
+    Returns:
+        pd.DataFrame: Validated pandas DataFrame with proper data types
+    
+    Raises:
+        ValueError: If data validation fails or required columns are missing
+        FileNotFoundError: If input file doesn't exist
+    """
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+    
+    try:
+        # Load data with appropriate compression detection
+        df = pd.read_csv(input_path, sep='\t', compression='gzip' if input_path.suffix == '.gz' else None)
+    except Exception as e:
+        raise ValueError(f"Failed to load input file: {str(e)}")
+    
+    # Determine required columns based on mode
+    base_columns = {'chr', 'pos', 'af'}
+    required_columns = base_columns.copy()
+    read_columns = []
+    
+    if mode == 'cfDNA':
+        required_columns.update({cfdna_ref_col, cfdna_alt_col})
+        read_columns = [cfdna_ref_col, cfdna_alt_col]
+        console.print(f"[cyan]Validating cfDNA mode with columns: {cfdna_ref_col}, {cfdna_alt_col}[/cyan]")
+    elif mode == 'cfDNA+WBC':
+        required_columns.update({cfdna_ref_col, cfdna_alt_col, wbc_ref_col, wbc_alt_col})
+        read_columns = [cfdna_ref_col, cfdna_alt_col, wbc_ref_col, wbc_alt_col]
+        console.print(f"[cyan]Validating cfDNA+WBC mode with columns: {', '.join(read_columns)}[/cyan]")
+    elif mode == 'cfDNA+model':
+        required_columns.update({cfdna_ref_col, cfdna_alt_col, model_ref_col, model_alt_col})
+        read_columns = [cfdna_ref_col, cfdna_alt_col, model_ref_col, model_alt_col]
+        console.print(f"[cyan]Validating cfDNA+model mode with columns: {', '.join(read_columns)}[/cyan]")
+    elif mode == 'cfDNA+model+mGT':
+        required_columns.update({cfdna_ref_col, cfdna_alt_col, model_ref_col, model_alt_col})
+        read_columns = [cfdna_ref_col, cfdna_alt_col, model_ref_col, model_alt_col]
+        console.print(f"[cyan]Validating cfDNA+model+mGT mode with columns: {', '.join(read_columns)}[/cyan]")
+    else:
+        raise ValueError(f"Invalid mode: {mode}. Must be one of: cfDNA, cfDNA+WBC, cfDNA+model, cfDNA+model+mGT")
+    
+    # Check for required columns
+    if not required_columns.issubset(df.columns):
+        missing = required_columns - set(df.columns)
+        raise ValueError(f"Missing required columns for mode '{mode}': {missing}")
+    
+    # Basic data validation
+    if len(df) == 0:
+        raise ValueError("Input file is empty")
+    
+    # Ensure proper data types for base columns
+    df['pos'] = pd.to_numeric(df['pos'], errors='coerce')
+    df['af'] = pd.to_numeric(df['af'], errors='coerce')
+    
+    # Ensure proper data types for read count columns
+    for col in read_columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce', downcast='integer')
+    
+    # Build invalid mask for base columns
+    invalid_mask = (
+        df['af'].isna() | (df['af'] < 0) | (df['af'] > 1)
+    )
+    
+    # Add read count validation to invalid mask
+    for col in read_columns:
+        invalid_mask |= (df[col].isna() | (df[col] < 0))
+    
+    if invalid_mask.any():
+        console.print(f"[yellow]Warning: Removing {invalid_mask.sum()} rows with invalid data[/yellow]")
+        df = df[~invalid_mask]
+    
+    if len(df) == 0:
+        raise ValueError("No valid data remaining after filtering")
+    
+    # Apply depth filters
+    initial_count = len(df)
+    
+    # Filter by minimum raw depth (cfDNA reads)
+    if min_raw_depth > 0:
+        df['cfdna_total_depth'] = df[cfdna_ref_col] + df[cfdna_alt_col]
+        df = df[df['cfdna_total_depth'] >= min_raw_depth]
+        remaining_count = len(df)
+        percentage = (remaining_count / initial_count) * 100 if initial_count > 0 else 0
+        console.print(f"[cyan]Raw depth filter (≥{min_raw_depth}): {remaining_count:,} SNPs remaining ({percentage:.1f}%)[/cyan]")
+        df = df.drop(columns=['cfdna_total_depth']).reset_index(drop=True)
+        
+        if len(df) == 0:
+            raise ValueError("No SNPs remaining after raw depth filtering")
+    
+    # Filter by minimum model depth (only for cfDNA+model mode)
+    if min_model_depth > 0 and mode == 'cfDNA+model':
+        current_count = len(df)
+        df['model_total_depth'] = df[model_ref_col] + df[model_alt_col]
+        df = df[df['model_total_depth'] >= min_model_depth]
+        remaining_count = len(df)
+        percentage = (remaining_count / current_count) * 100 if current_count > 0 else 0
+        console.print(f"[cyan]Model depth filter (≥{min_model_depth}): {remaining_count:,} SNPs remaining ({percentage:.1f}%)[/cyan]")
+        df = df.drop(columns=['model_total_depth']).reset_index(drop=True)
+        
+        if len(df) == 0:
+            raise ValueError("No SNPs remaining after model depth filtering")
+    elif min_model_depth > 0 and mode not in ['cfDNA+model', 'cfDNA+model+mGT']:
+        console.print(f"[yellow]Warning: Model depth filter ignored for mode '{mode}' (only applies to 'cfDNA+model' modes)[/yellow]")
+    
+    # Calculate maternal reads for cfDNA+model+mGT mode
+    if mode == 'cfDNA+model+mGT':
+        console.print("[cyan]Calculating maternal reads as cfDNA - model reads[/cyan]")
+        
+        # Calculate maternal reads by subtracting model reads from cfDNA reads
+        df[wbc_ref_col] = df[cfdna_ref_col] - df[model_ref_col]
+        df[wbc_alt_col] = df[cfdna_alt_col] - df[model_alt_col]
+        
+        # Handle edge cases where subtraction results in negative values
+        negative_ref = df[wbc_ref_col] < 0
+        negative_alt = df[wbc_alt_col] < 0
+        
+        if negative_ref.any() or negative_alt.any():
+            negative_count = (negative_ref | negative_alt).sum()
+            console.print(f"[yellow]Warning: {negative_count} SNPs have negative maternal reads (model > cfDNA), setting to 0[/yellow]")
+            df.loc[negative_ref, wbc_ref_col] = 0
+            df.loc[negative_alt, wbc_alt_col] = 0
+        
+        # Filter out SNPs where maternal coverage is zero after calculation
+        df['maternal_total_reads'] = df[wbc_ref_col] + df[wbc_alt_col]
+        zero_maternal_coverage = df['maternal_total_reads'] == 0
+        
+        if zero_maternal_coverage.any():
+            console.print(f"[yellow]Warning: Removing {zero_maternal_coverage.sum()} SNPs with zero maternal coverage[/yellow]")
+            df = df[~zero_maternal_coverage]
+        
+        # Clean up temporary column
+        df = df.drop(columns=['maternal_total_reads']).reset_index(drop=True)
+        
+        if len(df) == 0:
+            raise ValueError("No SNPs remaining after calculating maternal reads")
+        
+        console.print(f"[green]Successfully calculated maternal reads for {len(df)} SNPs[/green]")
+    
+    return df
+
+
+import click
+from pathlib import Path
+
+
+@click.command()
+@click.option(
+    '--input-path', '-i',
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+    help='Path to input TSV.GZ file containing SNP data'
+)
+@click.option(
+    '--mode',
+    type=click.Choice(['cfDNA', 'cfDNA+WBC', 'cfDNA+model', 'cfDNA+model+mGT'], case_sensitive=False),
+    default='cfDNA',
+    help='Analysis mode: cfDNA (standard), cfDNA+WBC (with maternal WBC), cfDNA+model (with modeled maternal reads), cfDNA+model+mGT (with modeled reads and maternal genotyping)'
+)
+@click.option(
+    '--ff-min',
+    type=click.FloatRange(0.0, 1.0),
+    default=0.001,
+    help='Minimum fetal fraction for estimation (default: 0.001)'
+)
+@click.option(
+    '--ff-max',
+    type=click.FloatRange(0.0, 1.0),
+    default=0.3,
+    help='Maximum fetal fraction for estimation (default: 0.3)'
+)
+@click.option(
+    '--ff-step',
+    type=click.FloatRange(0.0001, 0.1),
+    default=0.001,
+    help='Step size for fetal fraction grid search (default: 0.001)'
+)
+@click.option(
+    '--cfdna-ref-col',
+    default='cfDNA_ref_reads',
+    help='Column name for cfDNA reference reads (default: cfDNA_ref_reads)'
+)
+@click.option(
+    '--cfdna-alt-col',
+    default='cfDNA_alt_reads',
+    help='Column name for cfDNA alternative reads (default: cfDNA_alt_reads)'
+)
+@click.option(
+    '--wbc-ref-col',
+    default='maternal_ref_reads',
+    help='Column name for maternal WBC reference reads (default: maternal_ref_reads)'
+)
+@click.option(
+    '--wbc-alt-col',
+    default='maternal_alt_reads',
+    help='Column name for maternal WBC alternative reads (default: maternal_alt_reads)'
+)
+@click.option(
+    '--model-ref-col',
+    default='fetal_ref_reads_from_model',
+    help='Column name for modeled fetal reference reads (default: fetal_ref_reads_from_model)'
+)
+@click.option(
+    '--model-alt-col',
+    default='fetal_alt_reads_from_model',
+    help='Column name for modeled fetal alternative reads (default: fetal_alt_reads_from_model)'
+)
+@click.option(
+    '--min-raw-depth',
+    type=click.IntRange(0, None),
+    default=0,
+    help='Minimum raw depth filter for cfDNA reads (default: 0)'
+)
+@click.option(
+    '--min-model-depth',
+    type=click.IntRange(0, None),
+    default=0,
+    help='Minimum model depth filter for model filtered reads (default: 0)'
+)
+@click.option(
+    '--ncpus',
+    type=click.IntRange(1, cpu_count()),
+    default=cpu_count(),
+    help=f'Number of CPU cores to use for parallel processing (default: {cpu_count()})'
+)
+@click.option(
+    '--verbose', '-v',
+    is_flag=True,
+    help='Enable verbose output'
+)
+def main(
+    input_path: Path,
+    mode: str,
+    ff_min: float,
+    ff_max: float,
+    ff_step: float,
+    cfdna_ref_col: str,
+    cfdna_alt_col: str,
+    wbc_ref_col: str,
+    wbc_alt_col: str,
+    model_ref_col: str,
+    model_alt_col: str,
+    min_raw_depth: int,
+    min_model_depth: int,
+    ncpus: int,
+    verbose: bool
+) -> None:
+    """
+    Fetal Fraction Estimator
+    
+    This tool estimates fetal fraction from cell-free DNA sequencing data
+    using maximum likelihood estimation.
+    
+    The input file should be a TSV.GZ file with columns:
+    chr, pos, af, and read count columns (names configurable via CLI options)
+     
+    Supports four analysis modes:
+    - cfDNA: Standard cell-free DNA analysis
+    - cfDNA+WBC: Analysis with maternal white blood cell data
+    - cfDNA+model: Analysis with modeled fetal reads
+    - cfDNA+model+mGT: Analysis with modeled fetal reads and maternal genotyping
+    
+    Returns the estimated fetal fraction to stdout.
+    """
+    # Configure console output
+    if verbose:
+        console.print("[blue]Verbose mode enabled[/blue]")
+    
+    try:
+        # Load and validate input data
+        console.print("[cyan]Loading input data...[/cyan]")
+        df = load_and_validate_data(
+            input_path,
+            mode=mode,
+            cfdna_ref_col=cfdna_ref_col,
+            cfdna_alt_col=cfdna_alt_col,
+            wbc_ref_col=wbc_ref_col,
+            wbc_alt_col=wbc_alt_col,
+            model_ref_col=model_ref_col,
+            model_alt_col=model_alt_col,
+            min_raw_depth=min_raw_depth,
+            min_model_depth=min_model_depth
+        )
+        
+        console.print(f"[green]✓ Loaded {len(df)} SNPs from {df['chr'].nunique()} chromosomes[/green]")
+        
+        # Initialize FFEstimator
+        ff_estimator = FFEstimator(mode=mode)
+        
+        # Estimate fetal fraction
+        console.print(f"[cyan]Estimating fetal fraction...[/cyan]")
+        
+        if mode == 'cfDNA':
+            estimated_ff, _ = ff_estimator.estimate(
+                df,
+                f_min=ff_min,
+                f_max=ff_max,
+                f_step=ff_step,
+                ncpus=ncpus,
+                ref_col=cfdna_ref_col,
+                alt_col=cfdna_alt_col
+            )
+        elif mode == 'cfDNA+WBC':
+            estimated_ff, _ = ff_estimator.estimate(
+                df,
+                f_min=ff_min,
+                f_max=ff_max,
+                f_step=ff_step,
+                ncpus=ncpus,
+                ref_col=cfdna_ref_col,
+                alt_col=cfdna_alt_col,
+                maternal_ref_col=wbc_ref_col,
+                maternal_alt_col=wbc_alt_col
+            )
+        elif mode in ['cfDNA+model', 'cfDNA+model+mGT']:
+            estimated_ff, _ = ff_estimator.estimate(
+                df,
+                f_min=ff_min,
+                f_max=ff_max,
+                f_step=ff_step,
+                ncpus=ncpus,
+                ref_col=model_ref_col,
+                alt_col=model_alt_col
+            )
+        
+        # Output the estimated fetal fraction to stdout
+        print(f"{estimated_ff:.6f}")
+        
+        if verbose:
+            console.print(f"[bold green]✓ Fetal fraction estimation complete: {estimated_ff:.6f}[/bold green]")
+        
+    except Exception as e:
+        console.print(f"[red]✗ Error: {str(e)}[/red]")
+        if verbose:
+            console.print_exception()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    # Set multiprocessing start method for compatibility
+    import multiprocessing as mp
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass  # Start method already set
+    
+    import sys
+    main()
