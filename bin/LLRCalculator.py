@@ -40,6 +40,31 @@ def _log_binomial_pmf_global(k: int, n: int, p: float) -> float:
     return log_coeff + k * math.log(p) + (n - k) * math.log(1 - p)
 
 
+def _log_beta_fn(a: float, b: float) -> float:
+    return math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
+
+
+def _alpha_beta_from_p_rho(p: float, rho: float, eps: float = 1e-12):
+    p = min(max(p, eps), 1.0 - eps)
+    rho = max(min(rho, 1.0 - eps), 0.0)
+    if rho <= 0.0:
+        return None, None
+    theta = (1.0 - rho) / rho
+    alpha = max(p * theta, eps)
+    beta  = max((1.0 - p) * theta, eps)
+    return alpha, beta
+
+
+def _log_betabinom_pmf_global(k: int, n: int, p: float, rho: float) -> float:
+    if n < 0 or k < 0 or k > n:
+        return float('-inf')
+    alpha, beta = _alpha_beta_from_p_rho(p, rho)
+    if alpha is None:
+        return _log_binomial_pmf_global(k, n, p)
+    log_coeff = _log_binomial_coeff_global(n, k)
+    return log_coeff + _log_beta_fn(k + alpha, n - k + beta) - _log_beta_fn(alpha, beta)
+
+
 def _log_sum_exp_global(log_values: np.ndarray) -> float:
     """Compute log(sum(exp(x_i))) for numerical stability."""
     if len(log_values) == 0:
@@ -120,7 +145,7 @@ class LLRCalculator:
     trisomy vs. disomy detection using different analysis modes.
     """
     
-    def __init__(self, mode: str = 'cfDNA', factor_modeling: bool = False):
+    def __init__(self, mode: str = 'cfDNA', factor_modeling: bool = False, beta_binomial: bool = False):
         """
         Initialize the Log Likelihood Ratio Calculator.
         
@@ -145,11 +170,18 @@ class LLRCalculator:
         self.allelic_bias = 0.47747748
         self.allelic_theo = 0.5
         self.factor_modeling = factor_modeling
-        
+        self.beta_binomial = beta_binomial
+        self.rho = 1e-4
+
         if factor_modeling:
             console.print(f"[green]LLRCalculator initialized in {mode} mode with probabilistic factor modeling[/green]")
         else:
             console.print(f"[green]LLRCalculator initialized in {mode} mode with fixed factors[/green]")
+
+        if beta_binomial:
+            console.print(f"[green]LLRCalculator initialized in {mode} mode with beta-binomial distribution[/green]")
+        else:
+            console.print(f"[green]LLRCalculator initialized in {mode} mode with binomial distribution[/green]")
     
     def calculate(
         self,
@@ -449,13 +481,13 @@ class LLRCalculator:
                                     log_terms_disomy.append(log_p_gm + log_p_gp + log_p_gf + log_integrated_obs_disomy)
                             else:
                                 # Use fixed disomy factor (1.0)
-                                p_alt_exp = ((1.0 - fetal_fraction) * (d_maternal / 2.0) + 
-                                           fetal_fraction * (d_fetal / 2.0))
-                                
-                                # Apply allelic bias
-                                # p_alt_exp = self._allelice_bias_adjust(p_alt_exp)
-                                
-                                log_p_obs = _log_binomial_pmf_global(alt_count, depth, p_alt_exp)
+                                p_alt_exp = (((1.0 - fetal_fraction) * d_maternal + fetal_fraction * d_fetal) / 2.0)
+
+                                if self.beta_binomial:
+                                    log_p_obs = _log_betabinom_pmf_global(alt_count, depth, p_alt_exp, self.rho)
+                                else:
+                                    log_p_obs = _log_binomial_pmf_global(alt_count, depth, p_alt_exp)
+
                                 if log_p_obs != float('-inf'):
                                     log_terms_disomy.append(log_p_gm + log_p_gp + log_p_gf + log_p_obs)
                         
@@ -492,17 +524,14 @@ class LLRCalculator:
                             else:
                                 # Use fixed trisomy factor (1.5)
                                 p_alt_exp_tri = ((1.0 - 1.5 * fetal_fraction) * (d_maternal / 2.0) + 
-                                               1.5 * fetal_fraction * (d_fetal / 3.0))
-                                
-                                # Alternative trisomy formula
-                                # ff_chr = (3 * fetal_fraction) / (2 + fetal_fraction)
-                                # p_alt_exp_tri = ((1.0 - ff_chr) * (d_maternal / 2.0) + 
-                                #                 ff_chr * (d_fetal / 3.0))
+                                            1.5 * fetal_fraction * (d_fetal / 3.0))
+                                # p_alt_exp_tri = ((1 - fetal_fraction) * d_maternal + fetal_fraction * d_fetal) / (2 * (1 - fetal_fraction) + 3 * fetal_fraction)
 
-                                # Apply allelic bias
-                                # p_alt_exp_tri = self._allelice_bias_adjust(p_alt_exp_tri)
-                                
-                                log_p_obs_tri = _log_binomial_pmf_global(alt_count, depth, p_alt_exp_tri)
+                                if self.beta_binomial:
+                                    log_p_obs_tri = _log_betabinom_pmf_global(alt_count, depth, p_alt_exp_tri, self.rho)
+                                else:
+                                    log_p_obs_tri = _log_binomial_pmf_global(alt_count, depth, p_alt_exp_tri)
+
                                 if log_p_obs_tri != float('-inf'):
                                     log_terms_trisomy.append(log_p_gm + log_p_gp + log_p_fd + log_p_obs_tri)
                 
@@ -525,7 +554,7 @@ class LLRCalculator:
         delta_logL = logL_trisomy - logL_disomy
         
         # Return log likelihood ratio directly (no need for overflow handling since we're not exponentiating)
-        return delta_logL
+        return 10 - delta_logL
 
     def _calculate_lr_with_maternal_reads(
         self,
@@ -1272,6 +1301,12 @@ from pathlib import Path
     help='Use probabilistic modeling for read release factors (disomy: N(1, 0.5²), trisomy: N(1.55, 0.6²)) instead of fixed factors (default: False)'
 )
 @click.option(
+    '--beta-binomial',
+    is_flag=True,
+    default=False,
+    help='Use beta-binomial distribution for allelic distribution (default: False)'
+)
+@click.option(
     '--cfdna-ref-col',
     default='cfDNA_ref_reads',
     help='Column name for cfDNA reference reads (default: cfDNA_ref_reads)'
@@ -1324,6 +1359,7 @@ def main(
     chromosome: str,
     mode: str,
     factor_modeling: bool,
+    beta_binomial: bool,
     cfdna_ref_col: str,
     cfdna_alt_col: str,
     wbc_ref_col: str,
@@ -1386,7 +1422,7 @@ def main(
         console.print(f"[cyan]Found {len(target_data)} SNPs for {chromosome}[/cyan]")
         
         # Initialize LLRCalculator
-        llr_calculator = LLRCalculator(mode=mode, factor_modeling=factor_modeling)
+        llr_calculator = LLRCalculator(mode=mode, factor_modeling=factor_modeling, beta_binomial=beta_binomial)
         
         # Calculate log likelihood ratio
         console.print(f"[cyan]Calculating log likelihood ratio for {chromosome}...[/cyan]")

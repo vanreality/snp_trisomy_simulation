@@ -5,3 +5,4 @@
 work/
 images/
 data/
+bin/__pycache__/
