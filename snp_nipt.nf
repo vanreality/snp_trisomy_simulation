@@ -115,9 +115,9 @@ workflow {
             file(params.fasta),
             file(params.fasta_index),
             file(params.known_sites_tsv),
-            file(params.known_sites_bed),
             file("${workflow.projectDir}/bin/bam_to_pileup.py"),
-            file("${workflow.projectDir}/bin/merge_pileups.py")
+            file("${workflow.projectDir}/bin/merge_pileups.py"),
+            file("${workflow.projectDir}/bin/split_site_tsv.py")
         )
         BAM_TO_PILEUP.out.pileup
             .set { ch_pileup_samplesheet }

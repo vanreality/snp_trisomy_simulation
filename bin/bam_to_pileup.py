@@ -98,6 +98,11 @@ def extract_reference_alternate_counts(variant_row: pd.Series) -> pd.Series:
         target_allele_index = alternate_alleles_list.index(variant_row['alt_target']) + 1
         alternate_count = depth_values[target_allele_index]
 
+    if variant_row['alt_target'] == 'C' and 'T' in alternate_alleles_list:
+        alternate_count += depth_values[alternate_alleles_list.index('T') + 1]
+    if variant_row['alt_target'] == 'G' and 'A' in alternate_alleles_list:
+        alternate_count += depth_values[alternate_alleles_list.index('A') + 1]
+
     return pd.Series({
         'cfDNA_ref_reads': reference_count,
         'cfDNA_alt_reads': alternate_count
