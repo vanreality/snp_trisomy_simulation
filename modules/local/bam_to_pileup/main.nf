@@ -41,6 +41,9 @@ process BAM_TO_PILEUP {
               --annotate AD,DP \\
               -Ou \${base}_full_depth.bam \\
             | bcftools view -Oz -o \${base}_full_depth.vcf.gz
+
+            bcftools index \${base}_full_depth.vcf.gz
+
             vcf_files="\${base}_full_depth.vcf.gz"
         fi
 
@@ -60,6 +63,9 @@ process BAM_TO_PILEUP {
               --annotate AD,DP \\
               -Ou \${base}_half_depth_ct.bam \\
             | bcftools view -Oz -o \${base}_half_depth_ct.vcf.gz
+
+            bcftools index \${base}_half_depth_ct.vcf.gz
+
             vcf_files="\$vcf_files \${base}_half_depth_ct.vcf.gz"
         fi
         
@@ -79,6 +85,9 @@ process BAM_TO_PILEUP {
               --annotate AD,DP \\
               -Ou \${base}_half_depth_ga.bam \\
             | bcftools view -Oz -o \${base}_half_depth_ga.vcf.gz
+
+            bcftools index \${base}_half_depth_ga.vcf.gz
+
             vcf_files="\$vcf_files \${base}_half_depth_ga.vcf.gz"
         fi
 
