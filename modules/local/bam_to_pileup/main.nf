@@ -114,8 +114,9 @@ process BAM_TO_PILEUP {
 
     # Remove intermediate files
     rm -f full_depth.bed half_depth_ct.bed half_depth_ga.bed
-    rm -f input*_full_depth.bam input*_half_depth_ct.bam input*_half_depth_ga.bam
-    rm -f input*_full_depth.vcf.gz input*_half_depth_ct.vcf.gz input*_half_depth_ga.vcf.gz
-    rm -f input*_full_depth.vcf.gz.tbi input*_half_depth_ct.vcf.gz.tbi input*_half_depth_ga.vcf.gz.tbi
+    rm -f input*_full_depth.bam input*_half_depth_ct*.bam input*_half_depth_ga*.bam
+    rm -f *.bai
+    rm -f *.csi
+    rm -f input*.vcf.gz input*.tsv.gz
     """
 }
