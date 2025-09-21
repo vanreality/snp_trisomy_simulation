@@ -84,7 +84,8 @@ process BAM_TO_PILEUP {
 
         # Merge existing vcf files
         if [ -n "\$vcf_files" ]; then
-            bcftools concat \$vcf_files -Oz -o \${base}.vcf.gz
+            bcftools concat -a \$vcf_files -Oz -o \${base}.vcf.gz
+            bcftools sort \${base}.vcf.gz -Oz -o \${base}_sorted.vcf.gz
         else
             echo "Error: No VCF files to concatenate for \$base"
             exit 1
@@ -92,7 +93,7 @@ process BAM_TO_PILEUP {
 
         # Process the BCF with a Python script to extract desired metrics
         python ${pileup_script} \\
-          --input-vcf \${base}.vcf.gz \\
+          --input-vcf \${base}_sorted.vcf.gz \\
           --known-sites ${known_sites_tsv} \\
           --output \${base}
     done
@@ -101,5 +102,11 @@ process BAM_TO_PILEUP {
     python ${merge_script} \\
       --inputs "\$(ls input*_pileup.tsv.gz | tr '\\n' ' ')" \\
       --output ${meta.id}_pileup.tsv.gz
+
+    # Remove intermediate files
+    rm -f full_depth.bed half_depth_ct.bed half_depth_ga.bed
+    rm -f input*_full_depth.bam input*_half_depth_ct.bam input*_half_depth_ga.bam
+    rm -f input*_full_depth.vcf.gz input*_half_depth_ct.vcf.gz input*_half_depth_ga.vcf.gz
+    rm -f input*_full_depth.vcf.gz.tbi input*_half_depth_ct.vcf.gz.tbi input*_half_depth_ga.vcf.gz.tbi
     """
 }
