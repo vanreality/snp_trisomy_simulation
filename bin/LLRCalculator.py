@@ -554,7 +554,7 @@ class LLRCalculator:
         delta_logL = logL_trisomy - logL_disomy
         
         # Return log likelihood ratio directly (no need for overflow handling since we're not exponentiating)
-        return 10 - delta_logL
+        return delta_logL
 
     def _calculate_lr_with_maternal_reads(
         self,
