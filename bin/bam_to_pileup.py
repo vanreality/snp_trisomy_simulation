@@ -83,12 +83,12 @@ def extract_reference_alternate_counts(variant_row: pd.Series) -> pd.Series:
 
     # Handle bisulfite sequencing conversion artifacts:
     # Add T depths to C reference counts (C->T conversion)
-    if variant_row['ref'] == 'C' and 'T' in alternate_alleles_list:
+    if variant_row['ref'] == 'C' and variant_row['alt_target'] != 'T' and 'T' in alternate_alleles_list:
         t_allele_index = alternate_alleles_list.index('T') + 1  # +1 because first depth is ref
         reference_count += depth_values[t_allele_index]
     
     # Add A depths to G reference counts (G->A conversion)
-    if variant_row['ref'] == 'G' and 'A' in alternate_alleles_list:
+    if variant_row['ref'] == 'G' and variant_row['alt_target'] != 'A' and 'A' in alternate_alleles_list:
         a_allele_index = alternate_alleles_list.index('A') + 1  # +1 because first depth is ref
         reference_count += depth_values[a_allele_index]
 
