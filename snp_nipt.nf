@@ -144,7 +144,7 @@ workflow {
             params.lr_mode,
             params.min_raw_depth,
             params.min_model_depth,
-            file("${workflow.projectDir}/bin/lr_calculator.py")
+            file("${workflow.projectDir}/bin/calculate_lr.py")
         )
 
         // 4. Merge LR output
