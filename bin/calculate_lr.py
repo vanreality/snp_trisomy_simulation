@@ -126,10 +126,10 @@ console = Console()
     help='Fast mode: estimate fetal fraction once using all chromosomes instead of per-chromosome estimation (default: False)'
 )
 @click.option(
-    '--factor-modeling',
+    '--beta-binomial',
     is_flag=True,
     default=False,
-    help='Use probabilistic modeling for read release factors (disomy: N(1, 0.5²), trisomy: N(1.55, 0.6²)) instead of fixed factors (default: False)'
+    help='Use beta-binomial distribution for allelic distribution (default: False)'
 )
 @click.option(
     '--verbose', '-v',
@@ -154,7 +154,7 @@ def main(
     min_model_depth: int,
     ncpus: int,
     fast: bool,
-    factor_modeling: bool,
+    beta_binomial: bool,
     verbose: bool
 ) -> None:
     """
@@ -259,14 +259,14 @@ def main(
         if mode in ['cfDNA', 'cfDNA+model']:
             # Use cfDNA mode for both standard and model-based analysis
             ff_estimator = FFEstimator(mode='cfDNA')
-            llr_calculator = LLRCalculator(mode='cfDNA', factor_modeling=factor_modeling)
+            llr_calculator = LLRCalculator(mode='cfDNA', beta_binomial=beta_binomial)
         elif mode == 'cfDNA+WBC':
             ff_estimator = FFEstimator(mode='cfDNA+WBC')
-            llr_calculator = LLRCalculator(mode='cfDNA+WBC', factor_modeling=factor_modeling)
+            llr_calculator = LLRCalculator(mode='cfDNA+WBC', beta_binomial=beta_binomial)
         elif mode == 'cfDNA+model+mGT':
             # Use cfDNA+model+mGT mode for both FF estimation and LLR calculation
             ff_estimator = FFEstimator(mode='cfDNA+model+mGT')
-            llr_calculator = LLRCalculator(mode='cfDNA+model+mGT', factor_modeling=factor_modeling)
+            llr_calculator = LLRCalculator(mode='cfDNA+model+mGT', beta_binomial=beta_binomial)
         
         # Initialize results storage
         results_list = []
@@ -385,12 +385,12 @@ def main(
                 # Calculate log likelihood ratio for target chromosome
                 console.print(f"[cyan]Calculating log likelihood ratio for {chr_name}...[/cyan]")
                 if mode == 'cfDNA':
-                    lr = llr_calculator.calculate(target_data, 
+                    llr = llr_calculator.calculate(target_data, 
                                            est_ff, 
                                            ref_col=cfdna_ref_col, 
                                            alt_col=cfdna_alt_col)
                 elif mode == 'cfDNA+WBC':
-                    lr = llr_calculator.calculate(
+                    llr = llr_calculator.calculate(
                         target_data, 
                         est_ff, 
                         ref_col=cfdna_ref_col, 
@@ -399,14 +399,14 @@ def main(
                         maternal_alt_col=wbc_alt_col
                     )
                 elif mode == 'cfDNA+model':
-                    lr = llr_calculator.calculate(
+                    llr = llr_calculator.calculate(
                         target_data, 
                         est_ff, 
                         ref_col=model_ref_col, 
                         alt_col=model_alt_col
                     )
                 elif mode == 'cfDNA+model+mGT':
-                    lr = llr_calculator.calculate(
+                    llr = llr_calculator.calculate(
                         target_data, 
                         est_ff, 
                         ref_col=model_ref_col, 
@@ -418,11 +418,11 @@ def main(
                 # Store results
                 results_list.append({
                     'Chrom': chr_name,
-                    'Log_LR': lr,
+                    'Log_LR': llr,
                     'Fetal Fraction': est_ff
                 })
                 
-                console.print(f"[green]✓ {chr_name}: FF = {est_ff:.3f}, Log LR = {lr:.2f}[/green]")
+                console.print(f"[green]✓ {chr_name}: FF = {est_ff:.3f}, Log LR = {llr:.2f}[/green]")
 
             except Exception as e:
                 console.print(f"[red]✗ Error processing {chr_name}: {str(e)}[/red]")

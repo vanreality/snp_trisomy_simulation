@@ -17,126 +17,6 @@ from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
 console = Console()
 
 
-# Global helper functions for numerical stability
-def _log_binomial_coeff_global(n: int, k: int) -> float:
-    """Compute log(C(n,k)) using log-gamma function for numerical stability."""
-    if k < 0 or k > n or n < 0:
-        return float('-inf')
-    if k == 0 or k == n:
-        return 0.0
-    return (math.lgamma(n + 1) - math.lgamma(k + 1) - math.lgamma(n - k + 1))
-
-
-def _log_binomial_pmf_global(k: int, n: int, p: float) -> float:
-    """Compute log-probability mass function of Binomial(n, p) at k."""
-    if n < 0 or k < 0 or k > n:
-        return float('-inf')
-    if p <= 0.0:
-        return 0.0 if k == 0 else float('-inf')
-    if p >= 1.0:
-        return 0.0 if k == n else float('-inf')
-    
-    log_coeff = _log_binomial_coeff_global(n, k)
-    return log_coeff + k * math.log(p) + (n - k) * math.log(1 - p)
-
-
-def _log_beta_fn(a: float, b: float) -> float:
-    return math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
-
-
-def _alpha_beta_from_p_rho(p: float, rho: float, eps: float = 1e-12):
-    p = min(max(p, eps), 1.0 - eps)
-    rho = max(min(rho, 1.0 - eps), 0.0)
-    if rho <= 0.0:
-        return None, None
-    theta = (1.0 - rho) / rho
-    alpha = max(p * theta, eps)
-    beta  = max((1.0 - p) * theta, eps)
-    return alpha, beta
-
-
-def _log_betabinom_pmf_global(k: int, n: int, p: float, rho: float) -> float:
-    if n < 0 or k < 0 or k > n:
-        return float('-inf')
-    alpha, beta = _alpha_beta_from_p_rho(p, rho)
-    if alpha is None:
-        return _log_binomial_pmf_global(k, n, p)
-    log_coeff = _log_binomial_coeff_global(n, k)
-    return log_coeff + _log_beta_fn(k + alpha, n - k + beta) - _log_beta_fn(alpha, beta)
-
-
-def _log_sum_exp_global(log_values: np.ndarray) -> float:
-    """Compute log(sum(exp(x_i))) for numerical stability."""
-    if len(log_values) == 0:
-        return float('-inf')
-    max_val = np.max(log_values)
-    if max_val == float('-inf'):
-        return float('-inf')
-    return max_val + math.log(np.sum(np.exp(log_values - max_val)))
-
-
-def _get_trisomy_factor_distribution(n_points: int = 21) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Generate discretized trisomy factor distribution N(1.5, 0.5^2).
-    
-    Args:
-        n_points (int): Number of discretization points. Defaults to 21.
-    
-    Returns:
-        Tuple[np.ndarray, np.ndarray]: (factor_values, log_probabilities)
-            - factor_values: Array of factor values
-            - log_probabilities: Log probabilities for each factor value
-    """
-    # Parameters for the trisomy factor distribution
-    mean = 1.5
-    std = 0.5
-    
-    # Create discretization points covering 3 standard deviations on each side
-    min_factor = max(0.1, mean - 3 * std)  # Ensure positive factor
-    max_factor = mean + 3 * std
-    
-    factor_values = np.linspace(min_factor, max_factor, n_points)
-    
-    # Compute log probabilities (unnormalized is fine since we'll normalize)
-    log_probs = -0.5 * ((factor_values - mean) / std) ** 2
-    
-    # Normalize to get proper log probabilities
-    log_probs = log_probs - _log_sum_exp_global(log_probs)
-    
-    return factor_values, log_probs
-
-
-def _get_disomy_factor_distribution(n_points: int = 21) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Generate discretized disomy factor distribution N(1.0, 0.5^2).
-    
-    Args:
-        n_points (int): Number of discretization points. Defaults to 21.
-    
-    Returns:
-        Tuple[np.ndarray, np.ndarray]: (factor_values, log_probabilities)
-            - factor_values: Array of factor values
-            - log_probabilities: Log probabilities for each factor value
-    """
-    # Parameters for the disomy factor distribution
-    mean = 1.0
-    std = 0.5
-    
-    # Create discretization points covering 3 standard deviations on each side
-    min_factor = max(0.1, mean - 3 * std)  # Ensure positive factor
-    max_factor = mean + 3 * std
-    
-    factor_values = np.linspace(min_factor, max_factor, n_points)
-    
-    # Compute log probabilities (unnormalized is fine since we'll normalize)
-    log_probs = -0.5 * ((factor_values - mean) / std) ** 2
-    
-    # Normalize to get proper log probabilities
-    log_probs = log_probs - _log_sum_exp_global(log_probs)
-    
-    return factor_values, log_probs
-
-
 class LLRCalculator:
     """
     Log Likelihood Ratio Calculator class for trisomy detection.
@@ -145,7 +25,64 @@ class LLRCalculator:
     trisomy vs. disomy detection using different analysis modes.
     """
     
-    def __init__(self, mode: str = 'cfDNA', factor_modeling: bool = False, beta_binomial: bool = False):
+    @staticmethod
+    def _log_binomial_coeff(n: int, k: int) -> float:
+        """Compute log(C(n,k)) using log-gamma function for numerical stability."""
+        if k < 0 or k > n or n < 0:
+            return float('-inf')
+        if k == 0 or k == n:
+            return 0.0
+        return (math.lgamma(n + 1) - math.lgamma(k + 1) - math.lgamma(n - k + 1))
+
+    @staticmethod
+    def _log_binomial_pmf(k: int, n: int, p: float) -> float:
+        """Compute log-probability mass function of Binomial(n, p) at k."""
+        if n < 0 or k < 0 or k > n:
+            return float('-inf')
+        if p <= 0.0:
+            return 0.0 if k == 0 else float('-inf')
+        if p >= 1.0:
+            return 0.0 if k == n else float('-inf')
+        
+        log_coeff = LLRCalculator._log_binomial_coeff(n, k)
+        return log_coeff + k * math.log(p) + (n - k) * math.log(1 - p)
+
+    @staticmethod
+    def _log_beta_fn(a: float, b: float) -> float:
+        return math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
+
+    @staticmethod
+    def _alpha_beta_from_p_rho(p: float, rho: float, eps: float = 1e-12):
+        p = min(max(p, eps), 1.0 - eps)
+        rho = max(min(rho, 1.0 - eps), 0.0)
+        if rho <= 0.0:
+            return None, None
+        theta = (1.0 - rho) / rho
+        alpha = max(p * theta, eps)
+        beta  = max((1.0 - p) * theta, eps)
+        return alpha, beta
+
+    @staticmethod
+    def _log_betabinom_pmf(k: int, n: int, p: float, rho: float) -> float:
+        if n < 0 or k < 0 or k > n:
+            return float('-inf')
+        alpha, beta = LLRCalculator._alpha_beta_from_p_rho(p, rho)
+        if alpha is None:
+            return LLRCalculator._log_binomial_pmf(k, n, p)
+        log_coeff = LLRCalculator._log_binomial_coeff(n, k)
+        return log_coeff + LLRCalculator._log_beta_fn(k + alpha, n - k + beta) - LLRCalculator._log_beta_fn(alpha, beta)
+
+    @staticmethod
+    def _log_sum_exp(log_values: np.ndarray) -> float:
+        """Compute log(sum(exp(x_i))) for numerical stability."""
+        if len(log_values) == 0:
+            return float('-inf')
+        max_val = np.max(log_values)
+        if max_val == float('-inf'):
+            return float('-inf')
+        return max_val + math.log(np.sum(np.exp(log_values - max_val)))
+    
+    def __init__(self, mode: str = 'cfDNA', beta_binomial: bool = False):
         """
         Initialize the Log Likelihood Ratio Calculator.
         
@@ -155,9 +92,6 @@ class LLRCalculator:
                        'cfDNA+WBC' incorporates maternal white blood cell genotyping.
                        'cfDNA+model' uses modeled fetal reads for calculation.
                        'cfDNA+model+mGT' uses modeled reads with maternal genotyping filtering.
-            factor_modeling (bool): Whether to use probabilistic modeling for read release factors.
-                                  If True, uses normal distributions for disomy (N(1, 0.5²)) and trisomy (N(1.55, 0.6²)).
-                                  If False, uses fixed factors (1.0 for disomy, 1.5 for trisomy).
         
         Raises:
             ValueError: If mode is not one of the supported modes.
@@ -167,16 +101,8 @@ class LLRCalculator:
             raise ValueError(f"Invalid mode: {mode}. Must be one of: {valid_modes}")
         
         self.mode = mode
-        self.allelic_bias = 0.47747748
-        self.allelic_theo = 0.5
-        self.factor_modeling = factor_modeling
         self.beta_binomial = beta_binomial
         self.rho = 1e-4
-
-        if factor_modeling:
-            console.print(f"[green]LLRCalculator initialized in {mode} mode with probabilistic factor modeling[/green]")
-        else:
-            console.print(f"[green]LLRCalculator initialized in {mode} mode with fixed factors[/green]")
 
         if beta_binomial:
             console.print(f"[green]LLRCalculator initialized in {mode} mode with beta-binomial distribution[/green]")
@@ -245,19 +171,6 @@ class LLRCalculator:
             )
         else:
             raise ValueError(f"Unsupported mode: {self.mode}")
-    
-    def _allelice_bias_adjust(
-        self,
-        p_alt_exp: float
-    ) -> float:
-        def logit(p): 
-            p = np.clip(p, 1e-10, 1-1e-10)
-            return np.log(p / (1 - p))
-        def sigmoid(x): 
-            return 1 / (1 + np.exp(-x))
-
-        delta = logit(self.allelic_bias) - logit(self.allelic_theo)
-        return sigmoid(logit(p_alt_exp) + delta)
 
     def _calculate_lr_cfdna(
         self,
@@ -457,39 +370,15 @@ class LLRCalculator:
                             
                             d_fetal = sum(int(allele) for allele in gf.split('/'))
                             
-                            if self.factor_modeling:
-                                # Use probabilistic disomy factor distribution
-                                disomy_factor_values, disomy_log_factor_probs = _get_disomy_factor_distribution()
-                                
-                                # Integrate over disomy factor distribution
-                                log_obs_terms_disomy = []
-                                for factor, log_factor_prob in zip(disomy_factor_values, disomy_log_factor_probs):
-                                    p_alt_exp = ((1.0 - factor * fetal_fraction) * (d_maternal / 2.0) + 
-                                               factor * fetal_fraction * (d_fetal / 2.0))
-                                    
-                                    # Apply allelic bias
-                                    b = self.allelic_bias
-                                    p_alt_exp = (p_alt_exp * b) / (p_alt_exp * b + (1 - p_alt_exp))
-                                    
-                                    log_p_obs = _log_binomial_pmf_global(alt_count, depth, p_alt_exp)
-                                    if log_p_obs != float('-inf'):
-                                        log_obs_terms_disomy.append(log_factor_prob + log_p_obs)
-                                
-                                # Combine all factor-weighted observations for disomy
-                                if log_obs_terms_disomy:
-                                    log_integrated_obs_disomy = _log_sum_exp_global(np.array(log_obs_terms_disomy))
-                                    log_terms_disomy.append(log_p_gm + log_p_gp + log_p_gf + log_integrated_obs_disomy)
+                            p_alt_exp = (((1.0 - fetal_fraction) * d_maternal + fetal_fraction * d_fetal) / 2.0)
+
+                            if self.beta_binomial:
+                                log_p_obs = self._log_betabinom_pmf(alt_count, depth, p_alt_exp, self.rho)
                             else:
-                                # Use fixed disomy factor (1.0)
-                                p_alt_exp = (((1.0 - fetal_fraction) * d_maternal + fetal_fraction * d_fetal) / 2.0)
+                                log_p_obs = self._log_binomial_pmf(alt_count, depth, p_alt_exp)
 
-                                if self.beta_binomial:
-                                    log_p_obs = _log_betabinom_pmf_global(alt_count, depth, p_alt_exp, self.rho)
-                                else:
-                                    log_p_obs = _log_binomial_pmf_global(alt_count, depth, p_alt_exp)
-
-                                if log_p_obs != float('-inf'):
-                                    log_terms_disomy.append(log_p_gm + log_p_gp + log_p_gf + log_p_obs)
+                            if log_p_obs != float('-inf'):
+                                log_terms_disomy.append(log_p_gm + log_p_gp + log_p_gf + log_p_obs)
                         
                         # Trisomy calculation
                         fetal_dist_tri = get_fetal_prob_trisomy(gm, gp)
@@ -499,51 +388,28 @@ class LLRCalculator:
                                 continue
                             log_p_fd = math.log(p_fd)
                             
-                            if self.factor_modeling:
-                                # Use probabilistic trisomy factor distribution
-                                factor_values, log_factor_probs = _get_trisomy_factor_distribution()
-                                
-                                # Integrate over trisomy factor distribution
-                                log_obs_terms = []
-                                for factor, log_factor_prob in zip(factor_values, log_factor_probs):
-                                    p_alt_exp_tri = ((1.0 - factor * fetal_fraction) * (d_maternal / 2.0) + 
-                                                   factor * fetal_fraction * (d_fetal / 3.0))
-                                    
-                                    # Apply allelic bias
-                                    b = self.allelic_bias
-                                    p_alt_exp_tri = (p_alt_exp_tri * b) / (p_alt_exp_tri * b + (1 - p_alt_exp_tri))
-                                    
-                                    log_p_obs_tri = _log_binomial_pmf_global(alt_count, depth, p_alt_exp_tri)
-                                    if log_p_obs_tri != float('-inf'):
-                                        log_obs_terms.append(log_factor_prob + log_p_obs_tri)
-                                
-                                # Combine all factor-weighted observations
-                                if log_obs_terms:
-                                    log_integrated_obs = _log_sum_exp_global(np.array(log_obs_terms))
-                                    log_terms_trisomy.append(log_p_gm + log_p_gp + log_p_fd + log_integrated_obs)
+                            # Use fixed trisomy factor (1.5)
+                            p_alt_exp_tri = ((1.0 - 1.5 * fetal_fraction) * (d_maternal / 2.0) + 
+                                        1.5 * fetal_fraction * (d_fetal / 3.0))
+                            # p_alt_exp_tri = ((1 - fetal_fraction) * d_maternal + fetal_fraction * d_fetal) / (2 * (1 - fetal_fraction) + 3 * fetal_fraction)
+
+                            if self.beta_binomial:
+                                log_p_obs_tri = self._log_betabinom_pmf(alt_count, depth, p_alt_exp_tri, self.rho)
                             else:
-                                # Use fixed trisomy factor (1.5)
-                                p_alt_exp_tri = ((1.0 - 1.5 * fetal_fraction) * (d_maternal / 2.0) + 
-                                            1.5 * fetal_fraction * (d_fetal / 3.0))
-                                # p_alt_exp_tri = ((1 - fetal_fraction) * d_maternal + fetal_fraction * d_fetal) / (2 * (1 - fetal_fraction) + 3 * fetal_fraction)
+                                log_p_obs_tri = self._log_binomial_pmf(alt_count, depth, p_alt_exp_tri)
 
-                                if self.beta_binomial:
-                                    log_p_obs_tri = _log_betabinom_pmf_global(alt_count, depth, p_alt_exp_tri, self.rho)
-                                else:
-                                    log_p_obs_tri = _log_binomial_pmf_global(alt_count, depth, p_alt_exp_tri)
-
-                                if log_p_obs_tri != float('-inf'):
-                                    log_terms_trisomy.append(log_p_gm + log_p_gp + log_p_fd + log_p_obs_tri)
+                            if log_p_obs_tri != float('-inf'):
+                                log_terms_trisomy.append(log_p_gm + log_p_gp + log_p_fd + log_p_obs_tri)
                 
                 # Compute SNP-level log-likelihoods
                 if log_terms_disomy:
-                    logL_snp_disomy = _log_sum_exp_global(np.array(log_terms_disomy))
+                    logL_snp_disomy = self._log_sum_exp(np.array(log_terms_disomy))
                     logL_disomy += logL_snp_disomy
                 else:
                     return 0.0  # No valid disomy combinations
                 
                 if log_terms_trisomy:
-                    logL_snp_trisomy = _log_sum_exp_global(np.array(log_terms_trisomy))
+                    logL_snp_trisomy = self._log_sum_exp(np.array(log_terms_trisomy))
                     logL_trisomy += logL_snp_trisomy
                 else:
                     return 0.0  # No valid trisomy combinations
@@ -687,7 +553,7 @@ class LLRCalculator:
         
         for g in range(3):
             p = maternal_alt_frac_options[g]
-            log_pmfs = [_log_binomial_pmf_global(k, n, p) for k, n in zip(m_alt, m_n)]
+            log_pmfs = [self._log_binomial_pmf(k, n, p) for k, n in zip(m_alt, m_n)]
             maternal_loglik[:, g] = log_pmfs
         
         maternal_genotypes_idx = np.argmax(maternal_loglik, axis=1)
@@ -738,30 +604,12 @@ class LLRCalculator:
                         log_p_gf = math.log(p_gf)
                         d_fetal = sum(int(allele) for allele in gf.split('/'))
                         
-                        if self.factor_modeling:
-                            # Use probabilistic disomy factor distribution
-                            disomy_factor_values, disomy_log_factor_probs = _get_disomy_factor_distribution()
-                            
-                            # Integrate over disomy factor distribution
-                            log_obs_terms_disomy = []
-                            for factor, log_factor_prob in zip(disomy_factor_values, disomy_log_factor_probs):
-                                p_alt_exp = ((1.0 - factor * fetal_fraction) * (d_maternal / 2.0) +
-                                             factor * fetal_fraction * (d_fetal / 2.0))
-                                log_p_obs = _log_binomial_pmf_global(alt_count, depth, p_alt_exp)
-                                if log_p_obs > float('-inf'):
-                                    log_obs_terms_disomy.append(log_factor_prob + log_p_obs)
-                            
-                            # Combine all factor-weighted observations for disomy
-                            if log_obs_terms_disomy:
-                                log_integrated_obs_disomy = _log_sum_exp_global(np.array(log_obs_terms_disomy))
-                                log_terms_disomy.append(log_p_gp + log_p_gf + log_integrated_obs_disomy)
-                        else:
-                            # Use fixed disomy factor (1.0)
-                            p_alt_exp = ((1.0 - fetal_fraction) * (d_maternal / 2.0) +
-                                         fetal_fraction * (d_fetal / 2.0))
-                            log_p_obs = _log_binomial_pmf_global(alt_count, depth, p_alt_exp)
-                            if log_p_obs > float('-inf'):
-                                log_terms_disomy.append(log_p_gp + log_p_gf + log_p_obs)
+                        # Use fixed disomy factor (1.0)
+                        p_alt_exp = ((1.0 - fetal_fraction) * (d_maternal / 2.0) +
+                                        fetal_fraction * (d_fetal / 2.0))
+                        log_p_obs = self._log_binomial_pmf(alt_count, depth, p_alt_exp)
+                        if log_p_obs > float('-inf'):
+                            log_terms_disomy.append(log_p_gp + log_p_gf + log_p_obs)
 
                     # Trisomy calculation
                     fetal_dist_tri = get_fetal_prob_trisomy(gm, gp)
@@ -771,39 +619,20 @@ class LLRCalculator:
                             continue
                         log_p_fd = math.log(p_fd)
                         
-                        if self.factor_modeling:
-                            # Use probabilistic trisomy factor distribution
-                            factor_values, log_factor_probs = _get_trisomy_factor_distribution()
-                            
-                            # Integrate over trisomy factor distribution
-                            log_obs_terms = []
-                            for factor, log_factor_prob in zip(factor_values, log_factor_probs):
-                                p_alt_exp_tri = ((1.0 - factor * fetal_fraction) * (d_maternal / 2.0) +
-                                                 factor * fetal_fraction * (d_fetal / 3.0))
-                                
-                                log_p_obs_tri = _log_binomial_pmf_global(alt_count, depth, p_alt_exp_tri)
-                                if log_p_obs_tri > float('-inf'):
-                                    log_obs_terms.append(log_factor_prob + log_p_obs_tri)
-                            
-                            # Combine all factor-weighted observations
-                            if log_obs_terms:
-                                log_integrated_obs = _log_sum_exp_global(np.array(log_obs_terms))
-                                log_terms_trisomy.append(log_p_gp + log_p_fd + log_integrated_obs)
-                        else:
-                            # Use fixed trisomy factor (1.5)
-                            p_alt_exp_tri = ((1.0 - 1.5 * fetal_fraction) * (d_maternal / 2.0) +
-                                            1.5 * fetal_fraction * (d_fetal / 3.0))
-                            
-                            log_p_obs_tri = _log_binomial_pmf_global(alt_count, depth, p_alt_exp_tri)
-                            if log_p_obs_tri > float('-inf'):
-                                log_terms_trisomy.append(log_p_gp + log_p_fd + log_p_obs_tri)
+                        # Use fixed trisomy factor (1.5)
+                        p_alt_exp_tri = ((1.0 - 1.5 * fetal_fraction) * (d_maternal / 2.0) +
+                                        1.5 * fetal_fraction * (d_fetal / 3.0))
+                        
+                        log_p_obs_tri = self._log_binomial_pmf(alt_count, depth, p_alt_exp_tri)
+                        if log_p_obs_tri > float('-inf'):
+                            log_terms_trisomy.append(log_p_gp + log_p_fd + log_p_obs_tri)
 
                 # Compute SNP-level log-likelihoods
                 if log_terms_disomy:
-                    logL_disomy += _log_sum_exp_global(np.array(log_terms_disomy))
+                    logL_disomy += self._log_sum_exp(np.array(log_terms_disomy))
                 
                 if log_terms_trisomy:
-                    logL_trisomy += _log_sum_exp_global(np.array(log_terms_trisomy))
+                    logL_trisomy += self._log_sum_exp(np.array(log_terms_trisomy))
                 
                 progress.advance(task)
 
@@ -1022,30 +851,12 @@ class LLRCalculator:
                             log_p_gf = math.log(p_gf)
                             d_fetal = sum(int(allele) for allele in gf.split('/'))
                             
-                            if self.factor_modeling:
-                                # Use probabilistic disomy factor distribution
-                                disomy_factor_values, disomy_log_factor_probs = _get_disomy_factor_distribution()
-                                
-                                # Integrate over disomy factor distribution
-                                log_obs_terms_disomy = []
-                                for factor, log_factor_prob in zip(disomy_factor_values, disomy_log_factor_probs):
-                                    p_alt_exp = ((1.0 - factor * fetal_fraction) * (d_maternal / 2.0) +
-                                                factor * fetal_fraction * (d_fetal / 2.0))
-                                    log_p_obs = _log_binomial_pmf_global(alt_count, depth, p_alt_exp)
-                                    if log_p_obs > float('-inf'):
-                                        log_obs_terms_disomy.append(log_factor_prob + log_p_obs)
-                                
-                                # Combine all factor-weighted observations for disomy
-                                if log_obs_terms_disomy:
-                                    log_integrated_obs_disomy = _log_sum_exp_global(np.array(log_obs_terms_disomy))
-                                    log_terms_disomy.append(log_p_gp + log_p_gf + log_integrated_obs_disomy)
-                            else:
-                                # Use fixed disomy factor (1.0)
-                                p_alt_exp = ((1.0 - fetal_fraction) * (d_maternal / 2.0) +
-                                            fetal_fraction * (d_fetal / 2.0))
-                                log_p_obs = _log_binomial_pmf_global(alt_count, depth, p_alt_exp)
-                                if log_p_obs > float('-inf'):
-                                    log_terms_disomy.append(log_p_gp + log_p_gf + log_p_obs)
+                            # Use fixed disomy factor (1.0)
+                            p_alt_exp = ((1.0 - fetal_fraction) * (d_maternal / 2.0) +
+                                        fetal_fraction * (d_fetal / 2.0))
+                            log_p_obs = self._log_binomial_pmf(alt_count, depth, p_alt_exp)
+                            if log_p_obs > float('-inf'):
+                                log_terms_disomy.append(log_p_gp + log_p_gf + log_p_obs)
 
                         # Trisomy calculation
                         fetal_dist_tri = get_fetal_prob_trisomy(gm, gp)
@@ -1055,37 +866,19 @@ class LLRCalculator:
                                 continue
                             log_p_fd = math.log(p_fd)
                             
-                            if self.factor_modeling:
-                                # Use probabilistic trisomy factor distribution
-                                factor_values, log_factor_probs = _get_trisomy_factor_distribution()
-                                
-                                # Integrate over trisomy factor distribution
-                                log_obs_terms = []
-                                for factor, log_factor_prob in zip(factor_values, log_factor_probs):
-                                    p_alt_exp_tri = ((1.0 - factor * fetal_fraction) * (d_maternal / 2.0) +
-                                                    factor * fetal_fraction * (d_fetal / 3.0))
-                                    log_p_obs_tri = _log_binomial_pmf_global(alt_count, depth, p_alt_exp_tri)
-                                    if log_p_obs_tri > float('-inf'):
-                                        log_obs_terms.append(log_factor_prob + log_p_obs_tri)
-                                
-                                # Combine all factor-weighted observations
-                                if log_obs_terms:
-                                    log_integrated_obs = _log_sum_exp_global(np.array(log_obs_terms))
-                                    log_terms_trisomy.append(log_p_gp + log_p_fd + log_integrated_obs)
-                            else:
-                                # Use fixed trisomy factor (1.5)
-                                p_alt_exp_tri = ((1.0 - 1.5 * fetal_fraction) * (d_maternal / 2.0) +
-                                               1.5 * fetal_fraction * (d_fetal / 3.0))
-                                log_p_obs_tri = _log_binomial_pmf_global(alt_count, depth, p_alt_exp_tri)
-                                if log_p_obs_tri > float('-inf'):
-                                    log_terms_trisomy.append(log_p_gp + log_p_fd + log_p_obs_tri)
+                            # Use fixed trisomy factor (1.5)
+                            p_alt_exp_tri = ((1.0 - 1.5 * fetal_fraction) * (d_maternal / 2.0) +
+                                            1.5 * fetal_fraction * (d_fetal / 3.0))
+                            log_p_obs_tri = self._log_binomial_pmf(alt_count, depth, p_alt_exp_tri)
+                            if log_p_obs_tri > float('-inf'):
+                                log_terms_trisomy.append(log_p_gp + log_p_fd + log_p_obs_tri)
 
                 # Compute SNP-level log-likelihoods
                 if log_terms_disomy:
-                    logL_disomy += _log_sum_exp_global(np.array(log_terms_disomy))
+                    logL_disomy += self._log_sum_exp(np.array(log_terms_disomy))
                 
                 if log_terms_trisomy:
-                    logL_trisomy += _log_sum_exp_global(np.array(log_terms_trisomy))
+                    logL_trisomy += self._log_sum_exp(np.array(log_terms_trisomy))
                 
                 progress.advance(task)
 
@@ -1295,12 +1088,6 @@ from pathlib import Path
     help='Analysis mode: cfDNA (standard), cfDNA+WBC (with maternal WBC), cfDNA+model (with modeled maternal reads), cfDNA+model+mGT (with modeled reads and maternal genotyping)'
 )
 @click.option(
-    '--factor-modeling',
-    is_flag=True,
-    default=False,
-    help='Use probabilistic modeling for read release factors (disomy: N(1, 0.5²), trisomy: N(1.55, 0.6²)) instead of fixed factors (default: False)'
-)
-@click.option(
     '--beta-binomial',
     is_flag=True,
     default=False,
@@ -1358,7 +1145,6 @@ def main(
     fetal_fraction: float,
     chromosome: str,
     mode: str,
-    factor_modeling: bool,
     beta_binomial: bool,
     cfdna_ref_col: str,
     cfdna_alt_col: str,
@@ -1422,7 +1208,7 @@ def main(
         console.print(f"[cyan]Found {len(target_data)} SNPs for {chromosome}[/cyan]")
         
         # Initialize LLRCalculator
-        llr_calculator = LLRCalculator(mode=mode, factor_modeling=factor_modeling, beta_binomial=beta_binomial)
+        llr_calculator = LLRCalculator(mode=mode, beta_binomial=beta_binomial)
         
         # Calculate log likelihood ratio
         console.print(f"[cyan]Calculating log likelihood ratio for {chromosome}...[/cyan]")
