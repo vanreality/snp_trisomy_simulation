@@ -134,9 +134,8 @@ workflow {
 
         SPLIT_BAM_BY_TXT.out.target
             .groupTuple(by: 0)
-            .map { sample, target ->
+            .map { meta, target ->
                 def bamList = target.toList()
-                def meta = [id: sample]
                 return tuple(meta, bamList)
             }
             .set { ch_target_samplesheet }
