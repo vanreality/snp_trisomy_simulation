@@ -1,4 +1,7 @@
 process CALCULATE_LR {
+    errorStrategy 'ignore'
+    maxErrors 10
+    maxRetries 1
     tag "$meta.id"
     
     input:
