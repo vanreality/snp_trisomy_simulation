@@ -52,28 +52,37 @@ class SNPSite:
 @dataclass
 class PileupCounts:
     """
-    Data class for storing probability-weighted pileup counts.
+    Data class for storing both probability-weighted and raw pileup counts.
     
     Attributes:
-        cfDNA_ref_reads (float): Fetal-weighted reference allele count
-        cfDNA_alt_reads (float): Fetal-weighted alternate allele count
+        fetal_ref_reads_from_model (float): Fetal-weighted reference allele count
+        fetal_alt_reads_from_model (float): Fetal-weighted alternate allele count
         maternal_ref_reads (float): Maternal-weighted reference allele count
         maternal_alt_reads (float): Maternal-weighted alternate allele count
+        cfDNA_ref_reads (int): Raw unweighted reference allele count
+        cfDNA_alt_reads (int): Raw unweighted alternate allele count
     """
-    cfDNA_ref_reads: float = 0.0
-    cfDNA_alt_reads: float = 0.0
+    fetal_ref_reads_from_model: float = 0.0
+    fetal_alt_reads_from_model: float = 0.0
     maternal_ref_reads: float = 0.0
     maternal_alt_reads: float = 0.0
+    cfDNA_ref_reads: int = 0
+    cfDNA_alt_reads: int = 0
     
     @property
-    def current_depth(self) -> float:
+    def fetal_current_depth_from_model(self) -> float:
         """Total fetal-weighted depth."""
-        return self.cfDNA_ref_reads + self.cfDNA_alt_reads
+        return self.fetal_ref_reads_from_model + self.fetal_alt_reads_from_model
     
     @property
     def maternal_current_depth(self) -> float:
         """Total maternal-weighted depth."""
         return self.maternal_ref_reads + self.maternal_alt_reads
+    
+    @property
+    def current_depth(self) -> int:
+        """Total raw unweighted depth."""
+        return self.cfDNA_ref_reads + self.cfDNA_alt_reads
 
 
 def load_probability_table(prob_file: Path, progress: Progress, task_id: TaskID) -> Dict[str, float]:
@@ -372,11 +381,13 @@ def process_pileup_site(bam_file: pysam.AlignmentFile, site: SNPSite,
                 
                 # Update counts based on classification
                 if classification == 'REF':
-                    counts.cfDNA_ref_reads += fetal_prob
+                    counts.fetal_ref_reads_from_model += fetal_prob
                     counts.maternal_ref_reads += maternal_prob
+                    counts.cfDNA_ref_reads += 1  # Raw unweighted count
                 elif classification == 'ALT':
-                    counts.cfDNA_alt_reads += fetal_prob
+                    counts.fetal_alt_reads_from_model += fetal_prob
                     counts.maternal_alt_reads += maternal_prob
+                    counts.cfDNA_alt_reads += 1  # Raw unweighted count
             
             break  # We only need the column at our target position
             
@@ -477,8 +488,10 @@ def save_pileup_output(results: List[Tuple[SNPSite, PileupCounts]], output_prefi
         # Write header and data
         with gzip.open(output_file, 'wt') as f:
             # Write header
-            header = ['chr', 'pos', 'ref', 'alt', 'af', 'cfDNA_ref_reads', 'cfDNA_alt_reads', 
-                     'current_depth', 'maternal_ref_reads', 'maternal_alt_reads', 'maternal_current_depth']
+            header = ['chr', 'pos', 'ref', 'alt', 'af', 
+                     'fetal_ref_reads_from_model', 'fetal_alt_reads_from_model', 'fetal_current_depth_from_model',
+                     'maternal_ref_reads', 'maternal_alt_reads', 'maternal_current_depth',
+                     'cfDNA_ref_reads', 'cfDNA_alt_reads', 'current_depth']
             f.write('\t'.join(header) + '\n')
             
             # Write data rows
@@ -489,12 +502,15 @@ def save_pileup_output(results: List[Tuple[SNPSite, PileupCounts]], output_prefi
                     site.ref,
                     site.alt,
                     f"{site.af:.6f}",
-                    f"{counts.cfDNA_ref_reads:.6f}",
-                    f"{counts.cfDNA_alt_reads:.6f}",
-                    f"{counts.current_depth:.6f}",
+                    f"{counts.fetal_ref_reads_from_model:.6f}",
+                    f"{counts.fetal_alt_reads_from_model:.6f}",
+                    f"{counts.fetal_current_depth_from_model:.6f}",
                     f"{counts.maternal_ref_reads:.6f}",
                     f"{counts.maternal_alt_reads:.6f}",
-                    f"{counts.maternal_current_depth:.6f}"
+                    f"{counts.maternal_current_depth:.6f}",
+                    f"{counts.cfDNA_ref_reads}",
+                    f"{counts.cfDNA_alt_reads}",
+                    f"{counts.current_depth}"
                 ]
                 f.write('\t'.join(row) + '\n')
         
@@ -612,15 +628,17 @@ def main(input_bam: Path, input_txt: Path, known_sites: Path,
         # Calculate summary statistics
         total_sites = len(pileup_results)
         if total_sites > 0:
-            total_fetal_depth = sum(counts.current_depth for _, counts in pileup_results)
+            total_fetal_depth = sum(counts.fetal_current_depth_from_model for _, counts in pileup_results)
             total_maternal_depth = sum(counts.maternal_current_depth for _, counts in pileup_results)
+            total_raw_depth = sum(counts.current_depth for _, counts in pileup_results)
             mean_fetal_depth = total_fetal_depth / total_sites
             mean_maternal_depth = total_maternal_depth / total_sites
+            mean_raw_depth = total_raw_depth / total_sites
             
             sites_with_coverage = sum(1 for _, counts in pileup_results 
-                                    if counts.current_depth > 0 or counts.maternal_current_depth > 0)
+                                    if counts.current_depth > 0)
         else:
-            mean_fetal_depth = mean_maternal_depth = 0.0
+            mean_fetal_depth = mean_maternal_depth = mean_raw_depth = 0.0
             sites_with_coverage = 0
         
         # Display summary statistics
@@ -632,8 +650,9 @@ def main(input_bam: Path, input_txt: Path, known_sites: Path,
         summary_table.add_row("Sites after BED filtering", f"{len(filtered_sites):,}")
         summary_table.add_row("Final pileup entries", f"{total_sites:,}")
         summary_table.add_row("Sites with coverage", f"{sites_with_coverage:,}")
-        summary_table.add_row("Mean fetal depth", f"{mean_fetal_depth:.2f}")
-        summary_table.add_row("Mean maternal depth", f"{mean_maternal_depth:.2f}")
+        summary_table.add_row("Mean fetal depth (weighted)", f"{mean_fetal_depth:.2f}")
+        summary_table.add_row("Mean maternal depth (weighted)", f"{mean_maternal_depth:.2f}")
+        summary_table.add_row("Mean raw depth (unweighted)", f"{mean_raw_depth:.2f}")
         summary_table.add_row("Read probabilities loaded", f"{len(prob_map):,}")
         
         console.print(summary_table)

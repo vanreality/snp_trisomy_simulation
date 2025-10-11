@@ -27,7 +27,7 @@ console = Console()
 # Define column specifications
 REQUIRED_COLUMNS = ['chr', 'pos', 'ref', 'alt', 'af', 'cfDNA_ref_reads', 'cfDNA_alt_reads', 'current_depth']
 MERGE_COLUMNS = ['chr', 'pos', 'ref', 'alt', 'af']
-NUMERIC_COLUMNS = ['cfDNA_ref_reads', 'cfDNA_alt_reads', 'current_depth', 'fetal_ref_reads_from_model', 'fetal_alt_reads_from_model']
+NUMERIC_COLUMNS = ['cfDNA_ref_reads', 'cfDNA_alt_reads', 'current_depth', 'fetal_ref_reads_from_model', 'fetal_alt_reads_from_model', 'fetal_current_depth_from_model', 'maternal_ref_reads', 'maternal_alt_reads', 'maternal_current_depth']
 
 
 def validate_file_exists(file_path: str) -> Path:
