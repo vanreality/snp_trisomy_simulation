@@ -70,12 +70,12 @@ def extract_reference_alternate_counts(variant_row: pd.Series) -> pd.Series:
         pd.Series: Contains 'reference_count' and 'alternate_count' fields.
 
     Examples:
-        For a C>A variant with depths "59,34,1,0" and alternates "A,C,<*>":
+        For a C->A variant with depths "59,34,1,0" and alternates "A,T,<*>":
         - reference_count = 59 (base C count)
         - alternate_count = 34 (A count)
     """
     # Parse comma-separated alternate alleles and depths
-    alternate_alleles_list = variant_row['alt_vcf'].split(',')  # e.g. ['A','C','<*>']
+    alternate_alleles_list = variant_row['alt_vcf'].split(',')  # e.g. ['A','T','<*>']
     depth_values = [int(depth) for depth in variant_row['ad'].split(',')]  # e.g. [59,34,1,0]
 
     # Initialize reference count with the first depth value (reference allele)

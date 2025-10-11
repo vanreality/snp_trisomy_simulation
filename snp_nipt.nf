@@ -6,9 +6,10 @@ include { VCF_TO_PILEUP } from './modules/local/vcf_to_pileup/main.nf'
 include { MERGE_LR_OUTPUT } from './modules/local/merge_lr_output/main.nf'
 include { BAM_TO_PILEUP } from './modules/local/bam_to_pileup/main.nf'
 include { SPLIT_BAM_BY_TXT } from './modules/local/split_bam_by_txt/main.nf'
+include { BAM_TO_PILEUP_PROB_WEIGHTED } from './modules/local/bam_to_pileup_prob_weighted/main.nf'
 
 workflow {
-    // 1. Input parquet processing
+    // 1. Input samplesheet(txt, bam, parquet) processing
     // ====================================
     
     // Determine input source (samplesheet or parquet)
@@ -126,7 +127,7 @@ workflow {
         )
         BAM_TO_PILEUP.out.pileup
             .set { ch_pileup_samplesheet }
-    } else if (params.input_txt_samplesheet) {
+    } else if (params.input_txt_samplesheet && params.filter_mode == "hard_filter") {
         SPLIT_BAM_BY_TXT(
             ch_txt_samplesheet,
             params.threshold
@@ -151,6 +152,24 @@ workflow {
         )
         BAM_TO_PILEUP.out.pileup
             .set { ch_pileup_samplesheet }
+    } else if (params.input_txt_samplesheet && params.filter_mode == "prob_weighted") {
+        ch_txt_samplesheet.groupTuple(by: 0)
+            .map { meta, txtFile, bamFile ->
+                def txtList = txtFile.toList()
+                def bamList = bamFile.toList()
+                return tuple(meta, txtList, bamList)
+            }
+            .set { ch_txt_samplesheet_grouped }
+
+        BAM_TO_PILEUP_PROB_WEIGHTED(
+            ch_txt_samplesheet_grouped,
+            file(params.known_sites_tsv),
+            file("${workflow.projectDir}/bin/bam_to_pileup_prob_weighted.py"),
+            file("${workflow.projectDir}/bin/merge_pileups.py"),
+            file("${workflow.projectDir}/bin/split_site_tsv.py")
+        )
+        BAM_TO_PILEUP_PROB_WEIGHTED.out.pileup
+            .set { ch_pileup_samplesheet }
     } else {
         EXTRACT_SNP_FROM_PARQUET(
             ch_parquet_samplesheet,
@@ -164,7 +183,7 @@ workflow {
         EXTRACT_SNP_FROM_PARQUET.out.pileup
             .set { ch_pileup_samplesheet }
     }
-    
+
 
     if (params.run_lr_calculator) {
         // 3. LR calculation
