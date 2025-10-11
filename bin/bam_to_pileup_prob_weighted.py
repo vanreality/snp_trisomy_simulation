@@ -109,7 +109,7 @@ def load_probability_table(prob_file: Path, progress: Progress, task_id: TaskID)
         
         # Build probability mapping, using first occurrence for duplicates
         # Use drop_duplicates for efficiency with large files
-        prob_data_dedup = prob_data.drop_duplicates(subset=['name'], keep='first')
+        prob_data_dedup = prob_data.drop_duplicates(subset=['name'], keep='first').copy()
         
         # Clamp probabilities to [0, 1] and create mapping
         prob_data_dedup['prob_class_1'] = prob_data_dedup['prob_class_1'].clip(0.0, 1.0)
@@ -226,26 +226,13 @@ def filter_sites_by_bed(sites: List[SNPSite], bed_file: Optional[Path],
     progress.update(task_id, description="Filtering sites by BED file...")
     
     try:
-        # Load BED regions into a set for efficient lookup
-        bed_regions = set()
+        # Load BED regions into a set for efficient lookup\
+        bed_regions_data = pd.read_csv(bed_file, sep='\t', header=None, names=['chr', 'start', 'end'])
         
-        with open(bed_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                
-                fields = line.split('\t')
-                if len(fields) < 3:
-                    continue
-                
-                chr_name = fields[0]
-                start = int(fields[1])  # 0-based
-                end = int(fields[2])    # 0-based exclusive
-                
-                # Add all positions in the interval to our lookup set
-                for pos in range(start + 1, end + 1):  # Convert to 1-based
-                    bed_regions.add((chr_name, pos))
+        chr_name = bed_regions_data['chr']
+        pos = bed_regions_data['end']
+
+        bed_regions = set(zip(chr_name, pos))
         
         # Filter sites that overlap with BED regions
         filtered_sites = []
