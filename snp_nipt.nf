@@ -5,7 +5,8 @@ include { CALCULATE_LR } from './modules/local/calculate_lr/main.nf'
 include { VCF_TO_PILEUP } from './modules/local/vcf_to_pileup/main.nf'
 include { MERGE_LR_OUTPUT } from './modules/local/merge_lr_output/main.nf'
 include { SPLIT_BAM_BY_TXT } from './modules/local/split_bam_by_txt/main.nf'
-include { BAM_TO_PILEUP_HARD_FILTER } from './modules/local/bam_to_pileup_hard_filter/main.nf'
+include { BAM_TO_PILEUP_HARD_FILTER as BAM_TO_PILEUP_HARD_FILTER_TARGET } from './modules/local/bam_to_pileup_hard_filter/main.nf'
+include { BAM_TO_PILEUP_HARD_FILTER as BAM_TO_PILEUP_HARD_FILTER_BACKGROUND } from './modules/local/bam_to_pileup_hard_filter/main.nf'
 include { BAM_TO_PILEUP_PROB_WEIGHTED } from './modules/local/bam_to_pileup_prob_weighted/main.nf'
 include { MERGE_PILEUP_HARD_FILTER } from './modules/local/merge_pileup_hard_filter/main.nf'
 
@@ -152,7 +153,7 @@ workflow {
             }
             .set { ch_background_samplesheet }
 
-        BAM_TO_PILEUP_HARD_FILTER(
+        BAM_TO_PILEUP_HARD_FILTER_TARGET(
             ch_target_samplesheet,
             file(params.fasta),
             file(params.fasta_index),
@@ -161,10 +162,10 @@ workflow {
             file("${workflow.projectDir}/bin/merge_pileups.py"),
             file("${workflow.projectDir}/bin/split_site_tsv.py")
         )
-        BAM_TO_PILEUP_HARD_FILTER.out.pileup
+        BAM_TO_PILEUP_HARD_FILTER_TARGET.out.pileup
             .set { ch_target_pileup_samplesheet }
 
-        BAM_TO_PILEUP_HARD_FILTER(
+        BAM_TO_PILEUP_HARD_FILTER_BACKGROUND(
             ch_background_samplesheet,
             file(params.fasta),
             file(params.fasta_index),
@@ -173,7 +174,7 @@ workflow {
             file("${workflow.projectDir}/bin/merge_pileups.py"),
             file("${workflow.projectDir}/bin/split_site_tsv.py")
         )
-        BAM_TO_PILEUP_HARD_FILTER.out.pileup
+        BAM_TO_PILEUP_HARD_FILTER_BACKGROUND.out.pileup
             .set { ch_background_pileup_samplesheet }
 
         ch_merged = ch_target_pileup_samplesheet.join(
