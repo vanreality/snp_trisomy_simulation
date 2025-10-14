@@ -4,9 +4,10 @@ include { EXTRACT_SNP_FROM_PARQUET } from './modules/local/extract_snp_from_parq
 include { CALCULATE_LR } from './modules/local/calculate_lr/main.nf'
 include { VCF_TO_PILEUP } from './modules/local/vcf_to_pileup/main.nf'
 include { MERGE_LR_OUTPUT } from './modules/local/merge_lr_output/main.nf'
-include { BAM_TO_PILEUP } from './modules/local/bam_to_pileup/main.nf'
 include { SPLIT_BAM_BY_TXT } from './modules/local/split_bam_by_txt/main.nf'
+include { BAM_TO_PILEUP_HARD_FILTER } from './modules/local/bam_to_pileup_hard_filter/main.nf'
 include { BAM_TO_PILEUP_PROB_WEIGHTED } from './modules/local/bam_to_pileup_prob_weighted/main.nf'
+include { MERGE_PILEUP_HARD_FILTER } from './modules/local/merge_pileup_hard_filter/main.nf'
 
 workflow {
     // 1. Input samplesheet(txt, bam, parquet) processing
@@ -116,7 +117,7 @@ workflow {
             }
             .set { ch_bam_samplesheet }
 
-        BAM_TO_PILEUP(
+        BAM_TO_PILEUP_HARD_FILTER(
             ch_bam_samplesheet,
             file(params.fasta),
             file(params.fasta_index),
@@ -125,7 +126,7 @@ workflow {
             file("${workflow.projectDir}/bin/merge_pileups.py"),
             file("${workflow.projectDir}/bin/split_site_tsv.py")
         )
-        BAM_TO_PILEUP.out.pileup
+        BAM_TO_PILEUP_HARD_FILTER.out.pileup
             .set { ch_pileup_samplesheet }
     } else if (params.input_txt_samplesheet && params.filter_mode == "hard_filter") {
         SPLIT_BAM_BY_TXT(
@@ -136,12 +137,22 @@ workflow {
         SPLIT_BAM_BY_TXT.out.target
             .groupTuple(by: 0)
             .map { meta, target ->
+                def new_meta = [id: meta.id, label: "target"]
                 def bamList = target.toList()
-                return tuple(meta, bamList)
+                return tuple(new_meta, bamList)
             }
             .set { ch_target_samplesheet }
 
-        BAM_TO_PILEUP(
+        SPLIT_BAM_BY_TXT.out.background
+            .groupTuple(by: 0)
+            .map { meta, background ->
+                def new_meta = [id: meta.id, label: "background"]
+                def bamList = background.toList()
+                return tuple(new_meta, bamList)
+            }
+            .set { ch_background_samplesheet }
+
+        BAM_TO_PILEUP_HARD_FILTER(
             ch_target_samplesheet,
             file(params.fasta),
             file(params.fasta_index),
@@ -150,7 +161,34 @@ workflow {
             file("${workflow.projectDir}/bin/merge_pileups.py"),
             file("${workflow.projectDir}/bin/split_site_tsv.py")
         )
-        BAM_TO_PILEUP.out.pileup
+        BAM_TO_PILEUP_HARD_FILTER.out.pileup
+            .set { ch_target_pileup_samplesheet }
+
+        BAM_TO_PILEUP_HARD_FILTER(
+            ch_background_samplesheet,
+            file(params.fasta),
+            file(params.fasta_index),
+            file(params.known_sites_tsv),
+            file("${workflow.projectDir}/bin/bam_to_pileup.py"),
+            file("${workflow.projectDir}/bin/merge_pileups.py"),
+            file("${workflow.projectDir}/bin/split_site_tsv.py")
+        )
+        BAM_TO_PILEUP_HARD_FILTER.out.pileup
+            .set { ch_background_pileup_samplesheet }
+
+        ch_merged = ch_target_pileup_samplesheet.join(
+            ch_background_pileup_samplesheet,
+            by: [{it[0].id}, {it[0].id}]
+        ).map {target, background -> 
+            def new_meta = [id: target[0].id]
+            return tuple(new_meta, target[1], background[1])
+        }
+
+        MERGE_PILEUP_HARD_FILTER(
+            ch_merged,
+            file("${workflow.projectDir}/bin/merge_pileup_hard_filter.py")
+        )
+        MERGE_PILEUP_HARD_FILTER.out.pileup
             .set { ch_pileup_samplesheet }
     } else if (params.input_txt_samplesheet && params.filter_mode == "prob_weighted") {
         ch_txt_samplesheet.groupTuple(by: 0)

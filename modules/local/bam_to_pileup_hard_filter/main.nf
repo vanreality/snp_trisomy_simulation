@@ -1,4 +1,4 @@
-process BAM_TO_PILEUP {
+process BAM_TO_PILEUP_HARD_FILTER {
     errorStrategy 'ignore'
     maxErrors 10
     maxRetries 1
@@ -14,9 +14,10 @@ process BAM_TO_PILEUP {
     path(split_site_script)
     
     output:
-    tuple val(meta), path("${meta.id}_pileup.tsv.gz"), emit: pileup
+    tuple val(meta), path("*_pileup.tsv.gz"), emit: pileup
     
     script:
+    def prefix = task.ext.prefix ?: "${meta.id}_${meta.label}"
     """
     # Process each BAM file
     for bam in input*.bam; do
@@ -110,7 +111,7 @@ process BAM_TO_PILEUP {
     # Merge all intermediate TSV outputs into final file
     python ${merge_script} \\
       --inputs "\$(ls input*_pileup.tsv.gz | tr '\\n' ' ')" \\
-      --output ${meta.id}_pileup.tsv.gz
+      --output ${prefix}_pileup.tsv.gz
 
     # Remove intermediate files
     rm -f full_depth.bed half_depth_ct.bed half_depth_ga.bed
