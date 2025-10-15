@@ -180,9 +180,9 @@ workflow {
         ch_merged = ch_target_pileup_samplesheet.join(
             ch_background_pileup_samplesheet,
             by: [{it[0].id}, {it[0].id}]
-        ).map {target, background -> 
-            def new_meta = [id: target[0].id]
-            return tuple(new_meta, target[1], background[1])
+        ).map {meta_target, pileup_target, meta_background, pileup_background -> 
+            def new_meta = [id: meta_target.id]
+            return tuple(new_meta, pileup_target, pileup_background)
         }
 
         MERGE_PILEUP_HARD_FILTER(
