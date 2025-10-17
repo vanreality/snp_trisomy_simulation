@@ -42,10 +42,14 @@ process BAM_TO_PILEUP_HARD_FILTER {
               -f ${fasta} \\
               --regions-file full_depth.bed \\
               --annotate AD,DP \\
-              -s "\${sample_name}" \\
               -Ou \${base}_full_depth.bam \\
-            | bcftools view -Oz -o \${base}_full_depth.vcf.gz
+            | bcftools view -Oz -o \${base}_full_depth_tmp.vcf.gz
 
+            # Rename sample to ensure consistency across all VCF files
+            echo "\${sample_name}" > sample_name.txt
+            bcftools reheader -s sample_name.txt \${base}_full_depth_tmp.vcf.gz -o \${base}_full_depth.vcf.gz
+            rm \${base}_full_depth_tmp.vcf.gz
+            
             bcftools index \${base}_full_depth.vcf.gz
 
             vcf_files="\${base}_full_depth.vcf.gz"
@@ -65,10 +69,14 @@ process BAM_TO_PILEUP_HARD_FILTER {
               -f ${fasta} \\
               --regions-file half_depth_ct.bed \\
               --annotate AD,DP \\
-              -s "\${sample_name}" \\
               -Ou \${base}_half_depth_ct.bam \\
-            | bcftools view -Oz -o \${base}_half_depth_ct.vcf.gz
+            | bcftools view -Oz -o \${base}_half_depth_ct_tmp.vcf.gz
 
+            # Rename sample to ensure consistency across all VCF files
+            echo "\${sample_name}" > sample_name.txt
+            bcftools reheader -s sample_name.txt \${base}_half_depth_ct_tmp.vcf.gz -o \${base}_half_depth_ct.vcf.gz
+            rm \${base}_half_depth_ct_tmp.vcf.gz
+            
             bcftools index \${base}_half_depth_ct.vcf.gz
 
             vcf_files="\$vcf_files \${base}_half_depth_ct.vcf.gz"
@@ -88,10 +96,14 @@ process BAM_TO_PILEUP_HARD_FILTER {
               -f ${fasta} \\
               --regions-file half_depth_ga.bed \\
               --annotate AD,DP \\
-              -s "\${sample_name}" \\
               -Ou \${base}_half_depth_ga.bam \\
-            | bcftools view -Oz -o \${base}_half_depth_ga.vcf.gz
+            | bcftools view -Oz -o \${base}_half_depth_ga_tmp.vcf.gz
 
+            # Rename sample to ensure consistency across all VCF files
+            echo "\${sample_name}" > sample_name.txt
+            bcftools reheader -s sample_name.txt \${base}_half_depth_ga_tmp.vcf.gz -o \${base}_half_depth_ga.vcf.gz
+            rm \${base}_half_depth_ga_tmp.vcf.gz
+            
             bcftools index \${base}_half_depth_ga.vcf.gz
 
             vcf_files="\$vcf_files \${base}_half_depth_ga.vcf.gz"
@@ -124,5 +136,6 @@ process BAM_TO_PILEUP_HARD_FILTER {
     rm -f *.bai
     rm -f *.csi
     rm -f input*.vcf.gz input*.tsv.gz
+    rm -f sample_name.txt
     """
 }
