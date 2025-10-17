@@ -23,6 +23,8 @@ process BAM_TO_PILEUP_HARD_FILTER {
     for bam in input*.bam; do
         # Get base name for output files
         base=\$(basename \$bam .bam)
+        # Use consistent sample name for all VCF files from this BAM
+        sample_name="\${base}"
         
         # Split the tsv file, output full_depth.bed, half_depth_ct.bed, half_depth_ga.bed
         python ${split_site_script} ${known_sites_tsv}
@@ -40,6 +42,7 @@ process BAM_TO_PILEUP_HARD_FILTER {
               -f ${fasta} \\
               --regions-file full_depth.bed \\
               --annotate AD,DP \\
+              -s "\${sample_name}" \\
               -Ou \${base}_full_depth.bam \\
             | bcftools view -Oz -o \${base}_full_depth.vcf.gz
 
@@ -62,6 +65,7 @@ process BAM_TO_PILEUP_HARD_FILTER {
               -f ${fasta} \\
               --regions-file half_depth_ct.bed \\
               --annotate AD,DP \\
+              -s "\${sample_name}" \\
               -Ou \${base}_half_depth_ct.bam \\
             | bcftools view -Oz -o \${base}_half_depth_ct.vcf.gz
 
@@ -84,6 +88,7 @@ process BAM_TO_PILEUP_HARD_FILTER {
               -f ${fasta} \\
               --regions-file half_depth_ga.bed \\
               --annotate AD,DP \\
+              -s "\${sample_name}" \\
               -Ou \${base}_half_depth_ga.bam \\
             | bcftools view -Oz -o \${base}_half_depth_ga.vcf.gz
 
