@@ -161,14 +161,14 @@ workflow {
             ch_target_samplesheet,
             [[:], file(params.fasta)],
             [[:], file(params.fasta_index)],
-            [[:], [:]]
+            [[:], []]
         )
         
         SAMTOOLS_MERGE_BACKGROUND(
             ch_background_samplesheet,
             [[:], file(params.fasta)],
             [[:], file(params.fasta_index)],
-            [[:], [:]]
+            [[:], []]
         )
 
         BAM_TO_PILEUP_HARD_FILTER_TARGET(
