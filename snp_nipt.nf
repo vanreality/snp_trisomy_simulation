@@ -10,6 +10,7 @@ include { BAM_TO_PILEUP_HARD_FILTER as BAM_TO_PILEUP_HARD_FILTER_TARGET } from '
 include { BAM_TO_PILEUP_HARD_FILTER as BAM_TO_PILEUP_HARD_FILTER_BACKGROUND } from './modules/local/bam_to_pileup_hard_filter/main.nf'
 include { BAM_TO_PILEUP_PROB_WEIGHTED } from './modules/local/bam_to_pileup_prob_weighted/main.nf'
 include { MERGE_PILEUP_HARD_FILTER } from './modules/local/merge_pileup_hard_filter/main.nf'
+include { FILTER_PILEUP } from './modules/local/filter_pileup/main.nf'
 
 workflow {
     // 1. Input samplesheet(txt, bam, parquet) processing
@@ -192,6 +193,11 @@ workflow {
         )
         MERGE_PILEUP_HARD_FILTER.out.pileup
             .set { ch_pileup_samplesheet }
+
+        FILTER_PILEUP(
+            ch_pileup_samplesheet,
+            file("${workflow.projectDir}/bin/filter_pileup.py")
+        )
     } else if (params.input_txt_samplesheet && params.filter_mode == "prob_weighted") {
         ch_txt_samplesheet.groupTuple(by: 0)
             .map { meta, txtFile, bamFile ->
@@ -210,6 +216,11 @@ workflow {
         )
         BAM_TO_PILEUP_PROB_WEIGHTED.out.pileup
             .set { ch_pileup_samplesheet }
+
+        FILTER_PILEUP(
+            ch_pileup_samplesheet, 
+            file("${workflow.projectDir}/bin/filter_pileup.py")
+        )
     } else {
         EXTRACT_SNP_FROM_PARQUET(
             ch_parquet_samplesheet,
