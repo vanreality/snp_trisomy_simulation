@@ -23,7 +23,7 @@ pretty.install()
 install(show_locals=True)
 import re
 import sys
-import rich_click as click
+import click
 import polars as pl
 import pysam
 from collections import OrderedDict
