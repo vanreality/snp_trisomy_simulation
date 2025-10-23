@@ -23,13 +23,13 @@ process SPLIT_ASSEMBLED_BED_BY_TXT {
 
     # Convert target bed file to bam file
     python ${convert_script} \
-        --input_bed ${prefix}_target.bed \
-        --output_bam ${prefix}_target.bam
+        ${prefix}_target.bed \
+        ${prefix}_target.bam
 
     # Convert background bed file to bam file
     python ${convert_script} \
-        --input_bed ${prefix}_background.bed \
-        --output_bam ${prefix}_background.bam
+        ${prefix}_background.bed \
+        ${prefix}_background.bam
 
     # Remove temporary files
     rm *.bed
