@@ -163,6 +163,8 @@ def merge_pileup_dataframes(dataframes: List[pd.DataFrame], file_names: List[str
         
         # Sort by chromosome and position for consistent output
         merged_df = merged_df.sort_values(['chr', 'pos']).reset_index(drop=True)
+
+        merged_df = merged_df.drop_duplicates(subset=MERGE_COLUMNS)
         
         return merged_df
         
