@@ -24,14 +24,18 @@ process SPLIT_ASSEMBLED_BED_BY_TXT {
     # Convert target bed file to bam file
     python ${convert_script} \
         ${prefix}_target.bed \
-        ${prefix}_target.bam
+        ${prefix}_target.unsorted.bam
+
+    samtools sort ${prefix}_target.unsorted.bam -o ${prefix}_target.bam
 
     # Convert background bed file to bam file
     python ${convert_script} \
         ${prefix}_background.bed \
-        ${prefix}_background.bam
+        ${prefix}_background.unsorted.bam
+
+    samtools sort ${prefix}_background.unsorted.bam -o ${prefix}_background.bam
 
     # Remove temporary files
-    rm *.bed
+    rm *.bed *.unsorted.bam
     """
 }
