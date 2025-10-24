@@ -13,6 +13,7 @@ process SPLIT_ASSEMBLED_BED_BY_TXT {
     
     script:
     def prefix = task.ext.prefix ?: "${meta.id}"
+    def ncpus = task.cpus
     """
     # Split assembled bed file by txt file, with probability threshold
     python ${split_script} \
@@ -23,17 +24,19 @@ process SPLIT_ASSEMBLED_BED_BY_TXT {
 
     # Convert target bed file to bam file
     python ${convert_script} \
-        ${prefix}_target.bed \
-        ${prefix}_target.unsorted.bam
+        -t ${ncpus} \
+        --input_bed ${prefix}_target.bed \
+        --output_bam ${prefix}_target.unsorted.bam
 
     samtools sort ${prefix}_target.unsorted.bam -o ${prefix}_target.bam
 
     # Convert background bed file to bam file
     python ${convert_script} \
-        ${prefix}_background.bed \
-        ${prefix}_background.unsorted.bam
+        -t ${ncpus} \
+        --input_bed ${prefix}_background.bed \
+        --output_bam ${prefix}_background.unsorted.bam
 
-    samtools sort ${prefix}_background.unsorted.bam -o ${prefix}_background.bam
+    samtools sort -@ ${ncpus} ${prefix}_background.unsorted.bam -o ${prefix}_background.bam
 
     # Remove temporary files
     rm *.bed *.unsorted.bam

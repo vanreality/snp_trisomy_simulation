@@ -1,11 +1,11 @@
 '''
+Convert BED format alignment table to BAM file with multi-threading support.
+
 Copyright (c) 2025-10-23 by LiMingyang, YiLab, Peking University.
 
 Author: Li Mingyang (limingyang200101@gmail.com)
 
 Institute: AAIS, Peking University
-
-File Name: /lustre1/cqyi/myli/bert/analysis_nipt/analysis_targets/220k/20251015-XML_igtc/DMRed_bed_intersect/assembed_to_bam.py
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -33,8 +33,10 @@ from typing import List, Dict
 import tempfile
 import os
 import multiprocessing
+import queue
+from threading import Thread
 
-# 准备BAM头部信息
+# Prepare BAM header information
 HEADER_DICT = OrderedDict([
     ("HD", {"VN": "1.6", "SO": "coordinate"}),
     ("SQ", [
@@ -67,19 +69,19 @@ HEADER_DICT = OrderedDict([
     ("RG", [{"ID": "SAMPLE", "SM": "SAMPLE"}])
 ])
 
-# 创建染色体名到索引的映射
+# Create chromosome name to index mapping
 CHROM_TO_TID = {sq["SN"]: tid for tid, sq in enumerate(HEADER_DICT["SQ"])}
 
 def create_aligned_segment(row: Dict) -> pysam.AlignedSegment:
-    """创建单个AlignedSegment对象"""
+    """Create a single AlignedSegment object from a row dict"""
     seg = pysam.AlignedSegment()
     
-    # 设置基本属性
+    # Set basic attributes
     seg.query_name = row["read_name"]
     seg.query_sequence = row["seq"]
     seg.flag = row["flag"]
     
-    # 设置染色体位置
+    # Set chromosome position
     chrom = row["chrom"]
     if chrom not in CHROM_TO_TID:
         return None
@@ -87,28 +89,47 @@ def create_aligned_segment(row: Dict) -> pysam.AlignedSegment:
     seg.reference_id = CHROM_TO_TID[chrom]
     seg.reference_start = row["start"]
     
-    # 设置质量值和CIGAR
+    # Set quality values and CIGAR
     seg.query_qualities = pysam.qualitystring_to_array(row["qual"])
-    seg.cigar = [(0, len(row["seq"]))]  # 完全匹配
+    seg.cigar = [(0, len(row["seq"]))]  # Perfect match
     
-    # 设置其他必填字段
-    seg.mapping_quality = 255  # 映射质量未知
-    seg.next_reference_id = -1  # 无配对read
+    # Set other required fields
+    seg.mapping_quality = 255  # Mapping quality unknown
+    seg.next_reference_id = -1  # No paired read
     seg.next_reference_start = -1
-    seg.template_length = 0  # insert size
+    seg.template_length = 0  # Insert size
     
-    # 设置read group
+    # Set read group
     seg.set_tag("RG", HEADER_DICT["RG"][0]["ID"])
     
     return seg
 
 
+def process_dataframe(df: pl.DataFrame) -> pl.DataFrame:
+    """Process a dataframe chunk: sequence conversion and quality generation"""
+    return df.with_columns(
+        # Sequence conversion: C→T, M→C
+        pl.col("seq").str.replace_all('C','T',literal=True).str.replace_all('M','C',literal=True),
+        
+        # Set flag value
+        pl.lit(99).alias("flag"),
+        
+        # Create quality string: all set to 'I' (Phred40)
+        pl.col("seq").map_elements(
+            lambda s: "I" * len(s), return_dtype=pl.String
+        ).alias("qual"),
+    )
+
+
 def process_chunk_to_bam(chunk_df: pl.DataFrame, output_path: str) -> tuple:
-    """处理数据块并写入临时BAM文件"""
+    """Process data chunk and write to temporary BAM file"""
     skipped = 0
     written = 0
     
     try:
+        # Process the chunk
+        chunk_df = process_dataframe(chunk_df)
+        
         with pysam.AlignmentFile(output_path, "wb", header=dict(HEADER_DICT)) as bam:
             for row in chunk_df.rows(named=True):
                 seg = create_aligned_segment(row)
@@ -119,18 +140,19 @@ def process_chunk_to_bam(chunk_df: pl.DataFrame, output_path: str) -> tuple:
                 written += 1
         return (output_path, written, skipped)
     except Exception as e:
+        click.echo(f"Error processing chunk: {str(e)}", err=True)
         return (output_path, 0, 0)
 
 
 def merge_bam_files(bam_files: List[str], output_bam: str):
-    """合并多个BAM文件"""
+    """Merge multiple BAM files into one"""
     if len(bam_files) == 1:
-        # 只有一个文件，直接重命名
+        # Only one file, just rename
         os.rename(bam_files[0], output_bam)
     else:
-        # 使用pysam合并
+        # Use pysam merge
         pysam.merge("-f", output_bam, *bam_files)
-        # 清理临时文件
+        # Clean up temporary files
         for bam_file in bam_files:
             try:
                 os.remove(bam_file)
@@ -138,8 +160,17 @@ def merge_bam_files(bam_files: List[str], output_bam: str):
                 pass
 
 
+def count_lines_fast(file_path: str) -> int:
+    """Fast line counting for progress tracking"""
+    try:
+        with open(file_path, 'rb') as f:
+            return sum(1 for _ in f)
+    except:
+        return None
+
+
 def process_bed_to_bam(input_path, output_bam, n_threads=4, chunk_size=50000):
-    """将BED格式表格转换为BAM文件（多线程版本）"""
+    """Convert BED format table to BAM file (multi-threaded, memory-efficient version)"""
     
     with Progress(
         "[progress.description]{task.description}",
@@ -149,66 +180,87 @@ def process_bed_to_bam(input_path, output_bam, n_threads=4, chunk_size=50000):
         TimeRemainingColumn(),
     ) as progress:
         
-        # 读取数据文件
-        read_task = progress.add_task("[cyan]读取输入文件...", total=1)
-        try:
-            df = pl.read_csv(
-                input_path,
-                separator="\t",
-                has_header=False,
-                new_columns=[
-                    "chrom", "start", "end", "read_name", 
-                    "flag_str", "dot", "seq", "seq_len"
-                ]
-            )
-            progress.update(read_task, completed=1)
-        except Exception as e:
-            click.echo(f"读取输入文件失败: {str(e)}", err=True)
-            sys.exit(1)
+        # Count total lines for progress tracking
+        count_task = progress.add_task("[cyan]Counting records...", total=1)
+        total_lines = count_lines_fast(input_path)
+        progress.update(count_task, completed=1)
         
-        # 处理数据
-        process_task = progress.add_task("[yellow]处理数据...", total=1)
-        df = df.with_columns(
-            # 序列转换：C→T, M→C
-            pl.col("seq").str.replace_all('C','T',literal=True).str.replace_all('M','C',literal=True),
-            
-            # 设置flag值
-            pl.lit(99).alias("flag"),
-            
-            # 创建质量字符串：全部设为'I'（Phred40）
-            pl.col("seq").map_elements(
-                lambda s: "I" * len(s), return_dtype=pl.String
-            ).alias("qual"),
-        )
-        progress.update(process_task, completed=1)
+        if total_lines:
+            click.echo(f"Total records: {total_lines:,}, using {n_threads} threads")
+            click.echo(f"Batch size: {chunk_size:,} records per chunk")
+        else:
+            click.echo(f"Processing file with {n_threads} threads (batch size: {chunk_size:,})")
         
-        total_rows = df.height
-        click.echo(f"总共 {total_rows:,} 条记录，使用 {n_threads} 个线程处理")
-        
-        # 分块处理
-        n_chunks = (total_rows + chunk_size - 1) // chunk_size
-        chunks = [df.slice(i * chunk_size, chunk_size) for i in range(n_chunks)]
-        
-        # 创建临时目录
+        # Create temporary directory
         temp_dir = tempfile.mkdtemp(prefix="bam_temp_")
         temp_bam_files = []
         
-        # 多线程处理
-        write_task = progress.add_task("[green]写入BAM文件...", total=n_chunks)
+        # Statistics
+        total_written = 0
+        total_skipped = 0
+        chunk_index = 0
+        
+        # Create batched reader for memory-efficient processing
+        reader = pl.read_csv_batched(
+            input_path,
+            separator="\t",
+            has_header=False,
+            new_columns=[
+                "chrom", "start", "end", "read_name", 
+                "flag_str", "dot", "seq", "seq_len"
+            ],
+            batch_size=chunk_size
+        )
+        
+        # Estimate total chunks
+        estimated_chunks = (total_lines // chunk_size + 1) if total_lines else 100
+        write_task = progress.add_task(
+            "[green]Processing and writing BAM...", 
+            total=estimated_chunks
+        )
         
         try:
+            # Process batches with thread pool
             with ThreadPoolExecutor(max_workers=n_threads) as executor:
-                # 提交所有任务
                 futures = []
-                for i, chunk in enumerate(chunks):
-                    temp_bam = os.path.join(temp_dir, f"chunk_{i:04d}.bam")
-                    future = executor.submit(process_chunk_to_bam, chunk, temp_bam)
-                    futures.append(future)
                 
-                # 收集结果
-                total_written = 0
-                total_skipped = 0
+                # Read and submit batches
+                while True:
+                    try:
+                        batch = reader.next_batches(1)
+                        if not batch:
+                            break
+                        
+                        chunk_df = batch[0]
+                        if chunk_df.height == 0:
+                            break
+                        
+                        temp_bam = os.path.join(temp_dir, f"chunk_{chunk_index:05d}.bam")
+                        future = executor.submit(process_chunk_to_bam, chunk_df, temp_bam)
+                        futures.append(future)
+                        chunk_index += 1
+                        
+                        # Process completed futures to avoid memory buildup
+                        if len(futures) >= n_threads * 2:
+                            completed = []
+                            for future in as_completed(futures):
+                                bam_path, written, skipped = future.result()
+                                temp_bam_files.append(bam_path)
+                                total_written += written
+                                total_skipped += skipped
+                                progress.update(write_task, advance=1)
+                                completed.append(future)
+                            
+                            # Remove completed futures
+                            futures = [f for f in futures if f not in completed]
+                        
+                    except StopIteration:
+                        break
+                    except Exception as e:
+                        click.echo(f"Error reading batch: {str(e)}", err=True)
+                        break
                 
+                # Process remaining futures
                 for future in as_completed(futures):
                     bam_path, written, skipped = future.result()
                     temp_bam_files.append(bam_path)
@@ -216,50 +268,58 @@ def process_bed_to_bam(input_path, output_bam, n_threads=4, chunk_size=50000):
                     total_skipped += skipped
                     progress.update(write_task, advance=1)
             
-            if total_skipped > 0:
-                click.echo(f"警告: 跳过 {total_skipped} 条未知染色体的记录", err=True)
+            # Update progress bar to actual chunk count
+            progress.update(write_task, completed=chunk_index, total=chunk_index)
             
-            # 合并BAM文件
+            if total_skipped > 0:
+                click.echo(f"Warning: Skipped {total_skipped:,} records with unknown chromosomes", err=True)
+            
+            # Merge BAM files
             if len(temp_bam_files) > 0:
-                merge_task = progress.add_task("[magenta]合并BAM文件...", total=1)
-                # 按文件名排序以保持顺序
+                merge_task = progress.add_task("[magenta]Merging BAM files...", total=1)
+                # Sort by filename to maintain order
                 temp_bam_files.sort()
                 merge_bam_files(temp_bam_files, output_bam)
                 progress.update(merge_task, completed=1)
                 
-                click.echo(f"[green]✓[/green] 成功转换 {total_written:,} 条记录到 {output_bam}")
+                click.echo(f"[green]✓[/green] Successfully converted {total_written:,} records to {output_bam}")
             else:
-                click.echo("错误: 没有生成任何BAM文件", err=True)
+                click.echo("Error: No BAM files were generated", err=True)
                 sys.exit(1)
                 
         except Exception as e:
-            click.echo(f"处理失败: {str(e)}", err=True)
+            click.echo(f"Processing failed: {str(e)}", err=True)
             sys.exit(1)
         finally:
-            # 清理临时目录
+            # Clean up temporary directory
             try:
                 os.rmdir(temp_dir)
             except:
                 pass
 
 @click.command()
-@click.argument("input_bed", type=click.Path(exists=True))
-@click.argument("output_bam", type=click.Path())
-@click.option("-t", "--threads", default=None, type=int, help="并行线程数 (默认: 自动检测所有可用CPU)")
-@click.option("-c", "--chunk-size", default=50000, type=int, help="每个块的记录数 (默认: 50000)")
+@click.option("--input_bed", type=click.Path(exists=True), required=True, help="Input BED file path (8 columns)")
+@click.option("--output_bam", type=click.Path(), required=True, help="Output BAM file path")
+@click.option("-t", "--threads", default=None, type=int, help="Number of parallel threads (default: auto-detect all available CPUs)")
+@click.option("-c", "--chunk-size", default=50000, type=int, help="Number of records per chunk (default: 50000)")
 def cli(input_bed, output_bam, threads, chunk_size):
-    """将BED格式的比对表转换为BAM文件（多线程版本）
+    """Convert BED format alignment table to BAM file (multi-threaded, memory-efficient version)
     
-    INPUT_BED: 输入表格路径（BED格式，8列）
-    OUTPUT_BAM: 输出BAM文件路径
+    This tool uses streaming processing to handle large files without loading 
+    everything into memory at once. It automatically detects and uses all available 
+    CPU cores for parallel processing.
     
-    示例:
-        python assembled_to_bam.py input.bed output.bam -t 8 -c 100000
+    Examples:
+        # Auto-detect CPUs, default chunk size
+        python assembled_to_bam.py --input_bed input.bed --output_bam output.bam
+        
+        # Use 8 threads with 100K records per chunk
+        python assembled_to_bam.py --input_bed input.bed --output_bam output.bam -t 8 -c 100000
     """
-    # 自动检测CPU数量
+    # Auto-detect CPU count
     if threads is None:
         threads = multiprocessing.cpu_count()
-        click.echo(f"自动检测到 {threads} 个CPU核心")
+        click.echo(f"Auto-detected {threads} CPU cores")
     
     process_bed_to_bam(input_bed, output_bam, n_threads=threads, chunk_size=chunk_size)
 
