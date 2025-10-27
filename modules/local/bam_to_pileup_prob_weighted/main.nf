@@ -47,8 +47,8 @@ process BAM_TO_PILEUP_PROB_WEIGHTED {
             samtools view -b -L half_depth_ct.bed \$bam -o \${base}_half_depth_ct_regions.bam
             samtools index \${base}_half_depth_ct_regions.bam
             
-            # Split by CT flags (flag==99 || flag==147)
-            samtools view -b -e 'flag==99 || flag==147' \${base}_half_depth_ct_regions.bam -o \${base}_half_depth_ct.bam
+            # Split by CT flags (flag==99 || flag==147 || flag==0)
+            samtools view -b -e 'flag==99 || flag==147 || flag==0' \${base}_half_depth_ct_regions.bam -o \${base}_half_depth_ct.bam
             samtools index \${base}_half_depth_ct.bam
             
             python ${pileup_script} \\
@@ -65,8 +65,8 @@ process BAM_TO_PILEUP_PROB_WEIGHTED {
             samtools view -b -L half_depth_ga.bed \$bam -o \${base}_half_depth_ga_regions.bam
             samtools index \${base}_half_depth_ga_regions.bam
             
-            # Split by GA flags (flag==83 || flag==163)
-            samtools view -b -e 'flag==83 || flag==163' \${base}_half_depth_ga_regions.bam -o \${base}_half_depth_ga.bam
+            # Split by GA flags (flag==83 || flag==163 || flag==16)
+            samtools view -b -e 'flag==83 || flag==163 || flag==16' \${base}_half_depth_ga_regions.bam -o \${base}_half_depth_ga.bam
             samtools index \${base}_half_depth_ga.bam
             
             python ${pileup_script} \\

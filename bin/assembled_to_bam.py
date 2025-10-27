@@ -1,42 +1,35 @@
-'''
-Convert BED format alignment table to BAM file with multi-threading support.
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-Copyright (c) 2025-10-23 by LiMingyang, YiLab, Peking University.
+"""
+Streamed BED-like TSV -> BAM converter (low-memory, robust)
+- Single writer thread + bounded queue provides hard backpressure.
+- Reads input line-by-line (csv module), no DataFrame kept in memory.
+- Writes directly to a single BAM (no temporary BAMs, no merge).
+"""
 
-Author: Li Mingyang (limingyang200101@gmail.com)
+from __future__ import annotations
+import os
+import sys
+import csv
+import click
+import tempfile
+from typing import Optional, Tuple
+from collections import OrderedDict
+from threading import Thread
+from queue import Queue, Empty
 
-Institute: AAIS, Peking University
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-'''
+import pysam
 from rich import print, pretty
 from rich.traceback import install
 from rich.progress import Progress, BarColumn, TimeRemainingColumn, MofNCompleteColumn
-pretty.install()
-install(show_locals=True)
-import re
-import sys
-import click
-import polars as pl
-import pysam
-from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict
-import tempfile
-import os
-import multiprocessing
-import queue
-from threading import Thread
 
-# Prepare BAM header information
+pretty.install()
+install(show_locals=False)
+
+# ---------------------------
+# BAM header and chromosome map
+# ---------------------------
 HEADER_DICT = OrderedDict([
     ("HD", {"VN": "1.6", "SO": "coordinate"}),
     ("SQ", [
@@ -68,110 +61,131 @@ HEADER_DICT = OrderedDict([
     ]),
     ("RG", [{"ID": "SAMPLE", "SM": "SAMPLE"}])
 ])
-
-# Create chromosome name to index mapping
 CHROM_TO_TID = {sq["SN"]: tid for tid, sq in enumerate(HEADER_DICT["SQ"])}
 
-def create_aligned_segment(row: Dict) -> pysam.AlignedSegment:
-    """Create a single AlignedSegment object from a row dict"""
-    seg = pysam.AlignedSegment()
+# ---------------------------
+# Core helpers
+# ---------------------------
+def _transform_seq(seq: str) -> str:
+    """Apply sequence conversion: C->T then M->C (order matters)."""
+    # NOTE: order is important to preserve original intention
+    return seq.replace("C", "T").replace("M", "C")
+
+def _convert_seq(seq: str) -> str:
+    """Return the complementary strand of a DNA sequence."""
+    # Convert to uppercase and define complement mapping
+    seq = seq.upper()
+    complement_map = str.maketrans('ACTGN', 'TGACN')
     
-    # Set basic attributes
-    seg.query_name = row["read_name"]
-    seg.query_sequence = row["seq"]
-    seg.flag = row["flag"]
-    
-    # Set chromosome position
-    chrom = row["chrom"]
-    if chrom not in CHROM_TO_TID:
+    # Reverse and complement the sequence
+    return seq.translate(complement_map)[::-1]
+
+def _row_to_segment(chrom: str, start: int, read_name: str, flag_str: str,  seq: str) -> Optional[pysam.AlignedSegment]:
+    """Create a pysam AlignedSegment from minimal fields."""
+    tid = CHROM_TO_TID.get(chrom)
+    if tid is None:
         return None
-        
-    seg.reference_id = CHROM_TO_TID[chrom]
-    seg.reference_start = row["start"]
-    
-    # Set quality values and CIGAR
-    seg.query_qualities = pysam.qualitystring_to_array(row["qual"])
-    seg.cigar = [(0, len(row["seq"]))]  # Perfect match
-    
-    # Set other required fields
-    seg.mapping_quality = 255  # Mapping quality unknown
-    seg.next_reference_id = -1  # No paired read
+
+    seq2 = _transform_seq(seq)
+    qual = "I" * len(seq2)
+
+    seg = pysam.AlignedSegment()
+    seg.query_name = read_name
+    # seg.query_sequence = seq2 if '99' in flag_str else _convert_seq(seq2)
+    seg.query_sequence = seq2
+    seg.flag = 0  if '99' in flag_str else 16
+    seg.reference_id = tid
+    seg.reference_start = int(start)
+    seg.mapping_quality = 255
+    seg.cigar = [(0, len(seq2))]  # M of full length
+    seg.next_reference_id = -1
     seg.next_reference_start = -1
-    seg.template_length = 0  # Insert size
-    
-    # Set read group
+    seg.template_length = 0
+    seg.query_qualities = pysam.qualitystring_to_array(qual)
     seg.set_tag("RG", HEADER_DICT["RG"][0]["ID"])
-    
     return seg
 
-
-def process_dataframe(df: pl.DataFrame) -> pl.DataFrame:
-    """Process a dataframe chunk: sequence conversion and quality generation"""
-    return df.with_columns(
-        # Sequence conversion: C→T, M→C
-        pl.col("seq").str.replace_all('C','T',literal=True).str.replace_all('M','C',literal=True),
-        
-        # Set flag value
-        pl.lit(99).alias("flag"),
-        
-        # Create quality string: all set to 'I' (Phred40)
-        pl.col("seq").map_elements(
-            lambda s: "I" * len(s), return_dtype=pl.String
-        ).alias("qual"),
-    )
-
-
-def process_chunk_to_bam(chunk_df: pl.DataFrame, output_path: str) -> tuple:
-    """Process data chunk and write to temporary BAM file"""
-    skipped = 0
+# ---------------------------
+# Writer thread
+# ---------------------------
+def _writer_worker(
+    q: Queue,
+    result_q: Queue,
+    out_bam_path: str,
+    progress_task: int,
+    progress: Progress,
+    progress_step: int = 10_000
+):
+    """
+    Single writer that consumes (chrom, start, read_name, seq) tuples and writes to one BAM.
+    Puts (written, skipped) into result_q when done.
+    """
     written = 0
-    
+    skipped = 0
+
     try:
-        # Process the chunk
-        chunk_df = process_dataframe(chunk_df)
-        
-        with pysam.AlignmentFile(output_path, "wb", header=dict(HEADER_DICT)) as bam:
-            for row in chunk_df.rows(named=True):
-                seg = create_aligned_segment(row)
+        with pysam.AlignmentFile(out_bam_path, "wb", header=dict(HEADER_DICT)) as bam:
+            while True:
+                item = q.get()
+                if item is None:  # sentinel marks the end
+                    q.task_done()
+                    break
+                chrom, start, read_name, flag_str, seq = item
+                seg = _row_to_segment(chrom, start, read_name, flag_str, seq)
                 if seg is None:
                     skipped += 1
-                    continue
-                bam.write(seg)
-                written += 1
-        return (output_path, written, skipped)
+                else:
+                    bam.write(seg)
+                    written += 1
+                    # Throttle UI updates to reduce overhead
+                    if progress_task is not None and (written % progress_step == 0):
+                        progress.update(progress_task, advance=progress_step)
+                q.task_done()
     except Exception as e:
-        click.echo(f"Error processing chunk: {str(e)}", err=True)
-        return (output_path, 0, 0)
+        # Propagate failure via result queue
+        result_q.put(("error", str(e)))
+        return
 
+    result_q.put(("ok", (written, skipped)))
 
-def merge_bam_files(bam_files: List[str], output_bam: str):
-    """Merge multiple BAM files into one"""
-    if len(bam_files) == 1:
-        # Only one file, just rename
-        os.rename(bam_files[0], output_bam)
-    else:
-        # Use pysam merge
-        pysam.merge("-f", output_bam, *bam_files)
-        # Clean up temporary files
-        for bam_file in bam_files:
-            try:
-                os.remove(bam_file)
-            except:
-                pass
-
-
-def count_lines_fast(file_path: str) -> int:
-    """Fast line counting for progress tracking"""
+# ---------------------------
+# Counting utility (optional)
+# ---------------------------
+def _count_lines(path: str) -> Optional[int]:
+    """Count lines in binary mode; return None if fails (e.g., pipe)."""
     try:
-        with open(file_path, 'rb') as f:
+        with open(path, "rb") as f:
             return sum(1 for _ in f)
-    except:
+    except Exception:
         return None
 
+# ---------------------------
+# Main streamed converter
+# ---------------------------
+def process_bed_to_bam_stream(
+    input_path: str,
+    output_bam: str,
+    queue_size: int = 50_000,
+    do_count: bool = True,
+    csv_dialect: str = "excel-tab"
+):
+    """
+    Fully streaming BED-like TSV -> BAM converter with bounded memory.
+    Input columns (no header):
+        0: chrom
+        1: start
+        2: end
+        3: read_name
+        4: flag_str
+        5: dot      (unused)
+        6: seq
+        7: seq_len  (unused)
+    """
 
-def process_bed_to_bam(input_path, output_bam, n_threads=4, chunk_size=50000):
-    """Convert BED format table to BAM file (multi-threaded, memory-efficient version)"""
-    
+    # Ensure output directory exists
+    out_dir = os.path.dirname(os.path.abspath(output_bam)) or "."
+    os.makedirs(out_dir, exist_ok=True)
+
     with Progress(
         "[progress.description]{task.description}",
         BarColumn(),
@@ -179,149 +193,111 @@ def process_bed_to_bam(input_path, output_bam, n_threads=4, chunk_size=50000):
         MofNCompleteColumn(),
         TimeRemainingColumn(),
     ) as progress:
-        
-        # Count total lines for progress tracking
-        count_task = progress.add_task("[cyan]Counting records...", total=1)
-        total_lines = count_lines_fast(input_path)
-        progress.update(count_task, completed=1)
-        
-        if total_lines:
-            click.echo(f"Total records: {total_lines:,}, using {n_threads} threads")
-            click.echo(f"Batch size: {chunk_size:,} records per chunk")
-        else:
-            click.echo(f"Processing file with {n_threads} threads (batch size: {chunk_size:,})")
-        
-        # Create temporary directory
-        temp_dir = tempfile.mkdtemp(prefix="bam_temp_")
-        temp_bam_files = []
-        
-        # Statistics
-        total_written = 0
-        total_skipped = 0
-        chunk_index = 0
-        
-        # Create batched reader for memory-efficient processing
-        reader = pl.read_csv_batched(
-            input_path,
-            separator="\t",
-            has_header=False,
-            new_columns=[
-                "chrom", "start", "end", "read_name", 
-                "flag_str", "dot", "seq", "seq_len"
-            ],
-            batch_size=chunk_size
-        )
-        
-        # Estimate total chunks
-        estimated_chunks = (total_lines // chunk_size + 1) if total_lines else 100
-        write_task = progress.add_task(
-            "[green]Processing and writing BAM...", 
-            total=estimated_chunks
-        )
-        
-        try:
-            # Process batches with thread pool
-            with ThreadPoolExecutor(max_workers=n_threads) as executor:
-                futures = []
-                
-                # Read and submit batches
-                while True:
-                    try:
-                        batch = reader.next_batches(1)
-                        if not batch:
-                            break
-                        
-                        chunk_df = batch[0]
-                        if chunk_df.height == 0:
-                            break
-                        
-                        temp_bam = os.path.join(temp_dir, f"chunk_{chunk_index:05d}.bam")
-                        future = executor.submit(process_chunk_to_bam, chunk_df, temp_bam)
-                        futures.append(future)
-                        chunk_index += 1
-                        
-                        # Process completed futures to avoid memory buildup
-                        if len(futures) >= n_threads * 2:
-                            completed = []
-                            for future in as_completed(futures):
-                                bam_path, written, skipped = future.result()
-                                temp_bam_files.append(bam_path)
-                                total_written += written
-                                total_skipped += skipped
-                                progress.update(write_task, advance=1)
-                                completed.append(future)
-                            
-                            # Remove completed futures
-                            futures = [f for f in futures if f not in completed]
-                        
-                    except StopIteration:
-                        break
-                    except Exception as e:
-                        click.echo(f"Error reading batch: {str(e)}", err=True)
-                        break
-                
-                # Process remaining futures
-                for future in as_completed(futures):
-                    bam_path, written, skipped = future.result()
-                    temp_bam_files.append(bam_path)
-                    total_written += written
-                    total_skipped += skipped
-                    progress.update(write_task, advance=1)
-            
-            # Update progress bar to actual chunk count
-            progress.update(write_task, completed=chunk_index, total=chunk_index)
-            
-            if total_skipped > 0:
-                click.echo(f"Warning: Skipped {total_skipped:,} records with unknown chromosomes", err=True)
-            
-            # Merge BAM files
-            if len(temp_bam_files) > 0:
-                merge_task = progress.add_task("[magenta]Merging BAM files...", total=1)
-                # Sort by filename to maintain order
-                temp_bam_files.sort()
-                merge_bam_files(temp_bam_files, output_bam)
-                progress.update(merge_task, completed=1)
-                
-                click.echo(f"[green]✓[/green] Successfully converted {total_written:,} records to {output_bam}")
-            else:
-                click.echo("Error: No BAM files were generated", err=True)
-                sys.exit(1)
-                
-        except Exception as e:
-            click.echo(f"Processing failed: {str(e)}", err=True)
-            sys.exit(1)
-        finally:
-            # Clean up temporary directory
-            try:
-                os.rmdir(temp_dir)
-            except:
-                pass
 
+        # Optional counting pass for nicer ETA; can be disabled to save IO
+        total_lines = None
+        if do_count:
+            cnt_task = progress.add_task("[cyan]Counting records...", total=1)
+            total_lines = _count_lines(input_path)
+            progress.update(cnt_task, completed=1)
+
+        write_task = progress.add_task(
+            "[green]Writing BAM...",
+            total=total_lines if total_lines else None
+        )
+
+        q: Queue = Queue(maxsize=max(1, queue_size))
+        result_q: Queue = Queue(maxsize=1)
+
+        # Start writer thread (daemon so it won't block interpreter exit on fatal error)
+        writer = Thread(
+            target=_writer_worker,
+            args=(q, result_q, output_bam, write_task, progress),
+            daemon=True
+        )
+        writer.start()
+
+        # Producer: scan file line-by-line and feed queue
+        produced = 0
+        skipped_input = 0
+
+        # Use csv.reader with tab delimiter; robust and memory-light.
+        with open(input_path, "r", newline="") as fh:
+            reader = csv.reader(fh, delimiter="\t")
+            for row in reader:
+                # Validate row shape and extract minimal fields
+                # Skip malformed lines to keep pipeline running
+                try:
+                    chrom = row[0]
+                    start = int(row[1])
+                    read_name = row[3]
+                    flag_str = row[4]
+                    seq = row[6]
+                except Exception:
+                    skipped_input += 1
+                    continue
+
+                # This put() will block when queue is full -> hard backpressure
+                q.put((chrom, start, read_name, flag_str, seq))
+                produced += 1
+
+                # If we know total, keep progress in sync with production
+                if total_lines and (produced % 10_000 == 0):
+                    progress.update(write_task, completed=produced)
+
+        # Signal writer to finish and wait for all tasks drained
+        q.put(None)
+        q.join()
+
+        # Collect writer results
+        status, payload = result_q.get()
+        if status == "error":
+            raise RuntimeError(f"BAM writing failed: {payload}")
+
+        written, skipped_unknown_chrom = payload
+
+        # Finalize progress bar
+        if total_lines:
+            progress.update(write_task, completed=produced, total=produced)
+
+        # Summary
+        if skipped_input > 0:
+            click.echo(f"[yellow]Note[/yellow]: skipped malformed input lines: {skipped_input:,}", err=True)
+        if skipped_unknown_chrom > 0:
+            click.echo(f"[yellow]Note[/yellow]: skipped reads with unknown chromosomes: {skipped_unknown_chrom:,}", err=True)
+
+        click.echo(f"[green]✓[/green] Wrote BAM to [bold]{output_bam}[/bold]. "
+                   f"Input rows: {produced:,}, written: {written:,}.")
+
+# ---------------------------
+# CLI
+# ---------------------------
 @click.command()
-@click.option("--input_bed", type=click.Path(exists=True), required=True, help="Input BED file path (8 columns)")
-@click.option("--output_bam", type=click.Path(), required=True, help="Output BAM file path")
-@click.option("-t", "--threads", default=None, type=int, help="Number of parallel threads (default: auto-detect all available CPUs)")
-@click.option("-c", "--chunk-size", default=50000, type=int, help="Number of records per chunk (default: 50000)")
-def cli(input_bed, output_bam, threads, chunk_size):
-    """Convert BED format alignment table to BAM file (multi-threaded, memory-efficient version)
-    
-    This tool uses streaming processing to handle large files without loading 
-    everything into memory at once. It automatically detects and uses all available 
-    CPU cores for parallel processing.
-    
-    Examples:
-        # Auto-detect CPUs, default chunk size
-        python assembled_to_bam.py --input_bed input.bed --output_bam output.bam
-        
-        # Use 8 threads with 100K records per chunk
-        python assembled_to_bam.py --input_bed input.bed --output_bam output.bam -t 8 -c 100000
+@click.option("--input_bed", type=click.Path(exists=True), required=True,
+              help="Input BED-like TSV path (8 columns, tab-separated, no header)")
+@click.option("--output_bam", type=click.Path(), required=True,
+              help="Output BAM file path")
+@click.option("--queue-size", "-q", type=int, default=50_000,
+              help="Bounded queue size for backpressure (default: 50,000)")
+@click.option("--no-count", is_flag=True, default=True,
+              help="Skip the initial line counting pass to save I/O")
+def cli(input_bed: str, output_bam: str, queue_size: int, no_count: bool):
     """
-    # Auto-detect CPU count
-    if threads is None:
-        threads = multiprocessing.cpu_count()
-        click.echo(f"Auto-detected {threads} CPU cores")
-    
-    process_bed_to_bam(input_bed, output_bam, n_threads=threads, chunk_size=chunk_size)
+    Convert a BED-like alignment table to BAM using a single-writer streaming pipeline.
+    Example:
+        python assembled_to_bam_stream.py --input_bed input.bed --output_bam output.bam
+        python assembled_to_bam_stream.py -q 200000 --no-count --input_bed input.bed --output_bam output.bam
+    """
+    try:
+        process_bed_to_bam_stream(
+            input_bed,
+            output_bam,
+            queue_size=queue_size,
+            do_count=not no_count
+        )
+    except Exception as e:
+        click.echo(f"[red]Error[/red]: {e}", err=True)
+        sys.exit(1)
 
 if __name__ == "__main__":
     cli()
