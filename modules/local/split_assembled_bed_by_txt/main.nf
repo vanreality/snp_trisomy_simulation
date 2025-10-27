@@ -24,7 +24,6 @@ process SPLIT_ASSEMBLED_BED_BY_TXT {
 
     # Convert target bed file to bam file
     python ${convert_script} \
-        -t ${ncpus} \
         --input_bed ${prefix}_target.bed \
         --output_bam ${prefix}_target.unsorted.bam
 
@@ -32,7 +31,6 @@ process SPLIT_ASSEMBLED_BED_BY_TXT {
 
     # Convert background bed file to bam file
     python ${convert_script} \
-        -t ${ncpus} \
         --input_bed ${prefix}_background.bed \
         --output_bam ${prefix}_background.unsorted.bam
 
