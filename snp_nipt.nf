@@ -196,7 +196,7 @@ workflow {
             file(params.fasta),
             file(params.fasta_index),
             file(params.known_sites_tsv),
-            file("${workflow.projectDir}/bin/bam_to_pileup.py"),
+            file("${workflow.projectDir}/bin/bam_to_pileup_hard_filter.py"),
             file("${workflow.projectDir}/bin/merge_pileups.py"),
             file("${workflow.projectDir}/bin/split_site_tsv.py")
         )
@@ -208,7 +208,7 @@ workflow {
             file(params.fasta),
             file(params.fasta_index),
             file(params.known_sites_tsv),
-            file("${workflow.projectDir}/bin/bam_to_pileup.py"),
+            file("${workflow.projectDir}/bin/bam_to_pileup_hard_filter.py"),
             file("${workflow.projectDir}/bin/merge_pileups.py"),
             file("${workflow.projectDir}/bin/split_site_tsv.py")
         )

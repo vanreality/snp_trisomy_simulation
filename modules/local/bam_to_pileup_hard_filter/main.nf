@@ -23,14 +23,9 @@ process BAM_TO_PILEUP_HARD_FILTER {
     for bam in input*.bam; do
         # Get base name for output files
         base=\$(basename \$bam .bam)
-        # Use consistent sample name for all VCF files from this BAM
-        sample_name="\${base}"
         
         # Split the tsv file, output full_depth.bed, half_depth_ct.bed, half_depth_ga.bed
         python ${split_site_script} ${known_sites_tsv}
-
-        # Generate bcftools mpileup files
-        vcf_files=""
         
         # Process full_depth regions if bed file is not empty
         if [ -s full_depth.bed ]; then
@@ -38,21 +33,11 @@ process BAM_TO_PILEUP_HARD_FILTER {
             samtools view -b -L full_depth.bed \$bam -o \${base}_full_depth.bam
             samtools index \${base}_full_depth.bam
             
-            bcftools mpileup \\
-              -f ${fasta} \\
-              --regions-file full_depth.bed \\
-              --annotate AD,DP \\
-              -Ou \${base}_full_depth.bam \\
-            | bcftools view -Oz -o \${base}_full_depth_tmp.vcf.gz
-
-            # Rename sample to ensure consistency across all VCF files
-            echo "\${sample_name}" > sample_name.txt
-            bcftools reheader -s sample_name.txt \${base}_full_depth_tmp.vcf.gz -o \${base}_full_depth.vcf.gz
-            rm \${base}_full_depth_tmp.vcf.gz
-            
-            bcftools index \${base}_full_depth.vcf.gz
-
-            vcf_files="\${base}_full_depth.vcf.gz"
+            python ${pileup_script} \\
+              --input-bam \${base}_full_depth.bam \\
+              --known-sites ${known_sites_tsv} \\
+              --bed full_depth.bed \\
+              --output \${base}_full_depth
         fi
 
         # Process half_depth_ct regions if bed file is not empty
@@ -65,21 +50,11 @@ process BAM_TO_PILEUP_HARD_FILTER {
             samtools view -b -e 'flag==99 || flag==147 || flag==0' \${base}_half_depth_ct_regions.bam -o \${base}_half_depth_ct.bam
             samtools index \${base}_half_depth_ct.bam
             
-            bcftools mpileup \\
-              -f ${fasta} \\
-              --regions-file half_depth_ct.bed \\
-              --annotate AD,DP \\
-              -Ou \${base}_half_depth_ct.bam \\
-            | bcftools view -Oz -o \${base}_half_depth_ct_tmp.vcf.gz
-
-            # Rename sample to ensure consistency across all VCF files
-            echo "\${sample_name}" > sample_name.txt
-            bcftools reheader -s sample_name.txt \${base}_half_depth_ct_tmp.vcf.gz -o \${base}_half_depth_ct.vcf.gz
-            rm \${base}_half_depth_ct_tmp.vcf.gz
-            
-            bcftools index \${base}_half_depth_ct.vcf.gz
-
-            vcf_files="\$vcf_files \${base}_half_depth_ct.vcf.gz"
+            python ${pileup_script} \\
+              --input-bam \${base}_half_depth_ct.bam \\
+              --known-sites ${known_sites_tsv} \\
+              --bed half_depth_ct.bed \\
+              --output \${base}_half_depth_ct
         fi
         
         # Process half_depth_ga regions if bed file is not empty
@@ -92,42 +67,17 @@ process BAM_TO_PILEUP_HARD_FILTER {
             samtools view -b -e 'flag==83 || flag==163 || flag==16' \${base}_half_depth_ga_regions.bam -o \${base}_half_depth_ga.bam
             samtools index \${base}_half_depth_ga.bam
             
-            bcftools mpileup \\
-              -f ${fasta} \\
-              --regions-file half_depth_ga.bed \\
-              --annotate AD,DP \\
-              -Ou \${base}_half_depth_ga.bam \\
-            | bcftools view -Oz -o \${base}_half_depth_ga_tmp.vcf.gz
-
-            # Rename sample to ensure consistency across all VCF files
-            echo "\${sample_name}" > sample_name.txt
-            bcftools reheader -s sample_name.txt \${base}_half_depth_ga_tmp.vcf.gz -o \${base}_half_depth_ga.vcf.gz
-            rm \${base}_half_depth_ga_tmp.vcf.gz
-            
-            bcftools index \${base}_half_depth_ga.vcf.gz
-
-            vcf_files="\$vcf_files \${base}_half_depth_ga.vcf.gz"
+            python ${pileup_script} \\
+              --input-bam \${base}_half_depth_ga.bam \\
+              --known-sites ${known_sites_tsv} \\
+              --bed half_depth_ga.bed \\
+              --output \${base}_half_depth_ga
         fi
-
-        # Merge existing vcf files
-        if [ -n "\$vcf_files" ]; then
-            bcftools concat -a \$vcf_files -Oz -o \${base}.vcf.gz
-            bcftools sort \${base}.vcf.gz -Oz -o \${base}_sorted.vcf.gz
-        else
-            echo "Error: No VCF files to concatenate for \$base"
-            exit 1
-        fi
-
-        # Process the BCF with a Python script to extract desired metrics
-        python ${pileup_script} \\
-          --input-vcf \${base}_sorted.vcf.gz \\
-          --known-sites ${known_sites_tsv} \\
-          --output \${base}
     done
 
     # Merge all intermediate TSV outputs into final file
     python ${merge_script} \\
-      --inputs "\$(ls input*_pileup.tsv.gz | tr '\\n' ' ')" \\
+      --inputs "\$(ls *_pileup.tsv.gz | tr '\\n' ' ')" \\
       --output ${prefix}_pileup.tsv.gz
 
     # Remove intermediate files
