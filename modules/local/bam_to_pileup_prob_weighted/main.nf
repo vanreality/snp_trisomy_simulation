@@ -14,6 +14,7 @@ process BAM_TO_PILEUP_PROB_WEIGHTED {
     tuple val(meta), path("${meta.id}_pileup.tsv.gz"), emit: pileup
     
     script:
+    def ncpus = task.ext.ncpus ?: 4
     """
     # Process each BAM file
     for bam in input*.bam; do
@@ -26,7 +27,8 @@ process BAM_TO_PILEUP_PROB_WEIGHTED {
           --input-bam \${bam} \\
           --input-txt \${base}.txt \\
           --known-sites ${known_sites_tsv} \\
-          --output \${base}
+          --output \${base} \\
+          --ncpus \${ncpus}
     done
 
     # Merge all intermediate TSV outputs into final file

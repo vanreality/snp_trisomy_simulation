@@ -29,6 +29,8 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple, Set, List
 from collections import defaultdict
 from dataclasses import dataclass
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import partial
 
 import click
 import pandas as pd
@@ -457,11 +459,52 @@ def process_pileup_site(bam_file: pysam.AlignmentFile, site: SNPSite,
     return counts
 
 
+def process_sites_chunk(bam_path: Path, sites_chunk: List[SNPSite], 
+                       prob_map: Dict[str, float], min_mapq: int, min_bq: int) -> List[Tuple[SNPSite, PileupCounts]]:
+    """
+    Process a chunk of SNP sites in a worker process.
+    
+    This function is designed to be called by worker processes in the pool.
+    Each worker opens its own BAM file handle to avoid threading issues.
+    
+    Args:
+        bam_path (Path): Path to BAM file
+        sites_chunk (List[SNPSite]): Chunk of SNP sites to process
+        prob_map (Dict[str, float]): Read name to fetal probability mapping
+        min_mapq (int): Minimum mapping quality threshold
+        min_bq (int): Minimum base quality threshold
+        
+    Returns:
+        List[Tuple[SNPSite, PileupCounts]]: List of (site, counts) pairs for this chunk
+        
+    Raises:
+        Exception: If BAM file cannot be opened or processing fails
+    """
+    results = []
+    
+    try:
+        # Each worker opens its own BAM file handle
+        with pysam.AlignmentFile(str(bam_path), "rb") as bam:
+            for site in sites_chunk:
+                counts = process_pileup_site(bam, site, prob_map, min_mapq, min_bq)
+                results.append((site, counts))
+    except Exception as e:
+        # Return partial results with error information
+        console.print(f"[yellow]Warning: Error in worker process: {e}[/yellow]")
+        raise
+    
+    return results
+
+
 def generate_pileup_data(bam_file: Path, sites: List[SNPSite], prob_map: Dict[str, float],
-                        min_mapq: int, min_bq: int,
+                        min_mapq: int, min_bq: int, ncpus: int,
                         progress: Progress, task_id: TaskID) -> List[Tuple[SNPSite, PileupCounts]]:
     """
-    Generate probability-weighted pileup data for all SNP sites.
+    Generate probability-weighted pileup data for all SNP sites using parallel processing.
+    
+    Sites are divided into chunks and processed in parallel by multiple worker processes.
+    Each worker opens its own BAM file handle to avoid threading issues. Chunk size is
+    automatically calculated to balance memory usage and parallelization efficiency.
     
     Args:
         bam_file (Path): Path to BAM file
@@ -469,6 +512,7 @@ def generate_pileup_data(bam_file: Path, sites: List[SNPSite], prob_map: Dict[st
         prob_map (Dict[str, float]): Read name to fetal probability mapping
         min_mapq (int): Minimum mapping quality threshold
         min_bq (int): Minimum base quality threshold
+        ncpus (int): Number of parallel processes to use
         progress (Progress): Rich progress bar instance
         task_id (TaskID): Task ID for progress tracking
         
@@ -482,26 +526,57 @@ def generate_pileup_data(bam_file: Path, sites: List[SNPSite], prob_map: Dict[st
     if not bam_file.exists():
         raise FileNotFoundError(f"BAM file not found: {bam_file}")
     
-    progress.update(task_id, description="Processing pileup data...")
+    if len(sites) == 0:
+        console.print("[yellow]Warning: No sites to process[/yellow]")
+        return []
+    
+    progress.update(task_id, description=f"Processing pileup data with {ncpus} workers...")
     
     try:
-        # Open BAM file
-        with pysam.AlignmentFile(bam_file, "rb") as bam:
-            results = []
+        # Calculate chunk size: aim for at least 2-4 chunks per CPU for load balancing
+        # but not too small to avoid overhead
+        min_chunk_size = 50  # Minimum sites per chunk
+        target_chunks = ncpus * 3  # 3 chunks per CPU for good load balancing
+        chunk_size = max(min_chunk_size, len(sites) // target_chunks)
+        
+        # Split sites into chunks
+        site_chunks = [sites[i:i + chunk_size] for i in range(0, len(sites), chunk_size)]
+        
+        console.print(f"[blue]Processing {len(sites):,} sites in {len(site_chunks)} chunks "
+                     f"(~{chunk_size} sites/chunk) using {ncpus} workers[/blue]")
+        
+        results = []
+        completed_sites = 0
+        
+        # Process chunks in parallel
+        with ProcessPoolExecutor(max_workers=ncpus) as executor:
+            # Submit all chunks to the pool
+            future_to_chunk = {
+                executor.submit(process_sites_chunk, bam_file, chunk, prob_map, min_mapq, min_bq): chunk
+                for chunk in site_chunks
+            }
             
-            # Process each site
-            for i, site in enumerate(sites):
-                if i % 100 == 0:  # Update progress every 100 sites
-                    progress.update(task_id, advance=100 * 100 / len(sites) if len(sites) > 0 else 0)
-                
-                counts = process_pileup_site(bam, site, prob_map, min_mapq, min_bq)
-                results.append((site, counts))
-            
-            progress.update(task_id, advance=100)
-            console.print(f"[green]✓[/green] Processed pileup data for {len(results):,} sites")
-            
-            return results
-            
+            # Collect results as they complete
+            for future in as_completed(future_to_chunk):
+                chunk = future_to_chunk[future]
+                try:
+                    chunk_results = future.result()
+                    results.extend(chunk_results)
+                    completed_sites += len(chunk)
+                    
+                    # Update progress based on completed sites
+                    progress_pct = (completed_sites / len(sites)) * 100
+                    progress.update(task_id, completed=progress_pct)
+                    
+                except Exception as e:
+                    console.print(f"[red]Error processing chunk of {len(chunk)} sites: {e}[/red]")
+                    raise
+        
+        progress.update(task_id, completed=100)
+        console.print(f"[green]✓[/green] Processed pileup data for {len(results):,} sites")
+        
+        return results
+        
     except Exception as e:
         console.print(f"[red]Error processing BAM file: {e}[/red]")
         raise
@@ -621,8 +696,14 @@ def save_pileup_output(results: List[Tuple[SNPSite, PileupCounts]], output_prefi
     type=int,
     help='Minimum base quality threshold (default: 13)'
 )
+@click.option(
+    '--ncpus',
+    default=8,
+    type=int,
+    help='Number of parallel processes to use (default: 8)'
+)
 def main(input_bam: Path, input_txt: Path, known_sites: Path,
-         output: str, min_mapq: int, min_bq: int) -> None:
+         output: str, min_mapq: int, min_bq: int, ncpus: int) -> None:
     """
     Generate probability-weighted pileup data from bisulfite sequencing BAM files with strand-aware filtering.
     
@@ -656,6 +737,7 @@ def main(input_bam: Path, input_txt: Path, known_sites: Path,
     params_table.add_row("Output Prefix", output)
     params_table.add_row("Min MAPQ", str(min_mapq))
     params_table.add_row("Min Base Quality", str(min_bq))
+    params_table.add_row("Parallel Workers", str(ncpus))
     params_table.add_row("Bisulfite Filtering", "Enabled (strand-aware)")
     
     console.print(params_table)
@@ -681,9 +763,9 @@ def main(input_bam: Path, input_txt: Path, known_sites: Path,
             # Parse known sites (use all sites, no BED filtering)
             all_sites = parse_known_sites(known_sites, progress, sites_task)
             
-            # Generate pileup data with bisulfite-aware filtering
+            # Generate pileup data with bisulfite-aware filtering and parallel processing
             pileup_results = generate_pileup_data(
-                input_bam, all_sites, prob_map, min_mapq, min_bq,
+                input_bam, all_sites, prob_map, min_mapq, min_bq, ncpus,
                 progress, pileup_task
             )
             
