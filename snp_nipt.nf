@@ -5,7 +5,6 @@ include { CALCULATE_LR } from './modules/local/calculate_lr/main.nf'
 include { VCF_TO_PILEUP } from './modules/local/vcf_to_pileup/main.nf'
 include { MERGE_LR_OUTPUT } from './modules/local/merge_lr_output/main.nf'
 include { SPLIT_BAM_BY_TXT } from './modules/local/split_bam_by_txt/main.nf'
-include { BAM_TO_PILEUP_HARD_FILTER } from './modules/local/bam_to_pileup_hard_filter/main.nf'
 include { BAM_TO_PILEUP_HARD_FILTER as BAM_TO_PILEUP_HARD_FILTER_TARGET } from './modules/local/bam_to_pileup_hard_filter/main.nf'
 include { BAM_TO_PILEUP_HARD_FILTER as BAM_TO_PILEUP_HARD_FILTER_BACKGROUND } from './modules/local/bam_to_pileup_hard_filter/main.nf'
 include { BAM_TO_PILEUP_PROB_WEIGHTED } from './modules/local/bam_to_pileup_prob_weighted/main.nf'
@@ -13,7 +12,6 @@ include { MERGE_PILEUP_HARD_FILTER } from './modules/local/merge_pileup_hard_fil
 include { FILTER_PILEUP } from './modules/local/filter_pileup/main.nf'
 include { SAMTOOLS_MERGE as SAMTOOLS_MERGE_TARGET } from './modules/nf-core/samtools/merge/main.nf'
 include { SAMTOOLS_MERGE as SAMTOOLS_MERGE_BACKGROUND } from './modules/nf-core/samtools/merge/main.nf'
-include { SPLIT_ASSEMBLED_BED_BY_TXT } from './modules/local/split_assembled_bed_by_txt/main.nf'
 
 workflow {
     // 1. Input samplesheet(txt, bam, parquet) processing
@@ -54,25 +52,6 @@ workflow {
                 return [meta, txtFile, bamFile]
             }
             .set { ch_txt_samplesheet }
-    } else if (params.input_assembled_bed_samplesheet) {
-        Channel
-            .fromPath(params.input_assembled_bed_samplesheet)
-            .splitCsv(header: true)
-            .map { row -> 
-                def meta = [id: row.sample]
-                // Check if txt file exists
-                def txtFile = file(row.txt)
-                if (!txtFile.exists()) {
-                    error "txt file not found: ${row.txt}"
-                }
-                // Check if assembled bed file exists
-                def bedFile = file(row.bed)
-                if (!bedFile.exists()) {
-                    error "bed file not found: ${row.bed}"
-                }
-                return [meta, txtFile, bedFile]
-            }
-            .set { ch_assembled_bed_samplesheet }
     } else if (params.input_parquet) {
         // Run split_parquet_by_sample process to split input parquet file by sample
         SPLIT_PARQUET_BY_SAMPLE(
@@ -144,12 +123,9 @@ workflow {
 
         BAM_TO_PILEUP_HARD_FILTER(
             ch_bam_samplesheet,
-            file(params.fasta),
-            file(params.fasta_index),
             file(params.known_sites_tsv),
-            file("${workflow.projectDir}/bin/bam_to_pileup.py"),
-            file("${workflow.projectDir}/bin/merge_pileups.py"),
-            file("${workflow.projectDir}/bin/split_site_tsv.py")
+            file("${workflow.projectDir}/bin/bam_to_pileup_hard_filter.py"),
+            file("${workflow.projectDir}/bin/merge_pileups.py")
         )
         BAM_TO_PILEUP_HARD_FILTER.out.pileup
             .set { ch_pileup_samplesheet }
@@ -193,24 +169,18 @@ workflow {
 
         BAM_TO_PILEUP_HARD_FILTER_TARGET(
             ch_target_samplesheet,
-            file(params.fasta),
-            file(params.fasta_index),
             file(params.known_sites_tsv),
             file("${workflow.projectDir}/bin/bam_to_pileup_hard_filter.py"),
             file("${workflow.projectDir}/bin/merge_pileups.py"),
-            file("${workflow.projectDir}/bin/split_site_tsv.py")
         )
         BAM_TO_PILEUP_HARD_FILTER_TARGET.out.pileup
             .set { ch_target_pileup_samplesheet }
 
         BAM_TO_PILEUP_HARD_FILTER_BACKGROUND(
             ch_background_samplesheet,
-            file(params.fasta),
-            file(params.fasta_index),
             file(params.known_sites_tsv),
             file("${workflow.projectDir}/bin/bam_to_pileup_hard_filter.py"),
             file("${workflow.projectDir}/bin/merge_pileups.py"),
-            file("${workflow.projectDir}/bin/split_site_tsv.py")
         )
         BAM_TO_PILEUP_HARD_FILTER_BACKGROUND.out.pileup
             .set { ch_background_pileup_samplesheet }
@@ -248,96 +218,12 @@ workflow {
             file(params.known_sites_tsv),
             file("${workflow.projectDir}/bin/bam_to_pileup_prob_weighted.py"),
             file("${workflow.projectDir}/bin/merge_pileups.py"),
-            file("${workflow.projectDir}/bin/split_site_tsv.py")
         )
         BAM_TO_PILEUP_PROB_WEIGHTED.out.pileup
             .set { ch_pileup_samplesheet }
 
         FILTER_PILEUP(
             ch_pileup_samplesheet, 
-            file("${workflow.projectDir}/bin/filter_pileup.py")
-        )
-    } else if (params.input_assembled_bed_samplesheet && params.filter_mode == "hard_filter") {
-        SPLIT_ASSEMBLED_BED_BY_TXT(
-            ch_assembled_bed_samplesheet,
-            params.threshold,
-            file("${workflow.projectDir}/bin/split_assembled_bed_by_txt.py"),
-            file("${workflow.projectDir}/bin/assembled_to_bam.py")
-        )
-
-        SPLIT_ASSEMBLED_BED_BY_TXT.out.target
-            .groupTuple(by: 0)
-            .map { meta, target ->
-                def new_meta = [id: meta.id, label: "target"]
-                def bamList = target.toList()
-                return tuple(new_meta, bamList)
-            }
-            .set { ch_target_samplesheet }
-
-        SPLIT_ASSEMBLED_BED_BY_TXT.out.background
-            .groupTuple(by: 0)
-            .map { meta, background ->
-                def new_meta = [id: meta.id, label: "background"]
-                def bamList = background.toList()
-                return tuple(new_meta, bamList)
-            }
-            .set { ch_background_samplesheet }
-
-        SAMTOOLS_MERGE_TARGET(
-            ch_target_samplesheet,
-            [[:], file(params.fasta)],
-            [[:], file(params.fasta_index)],
-            [[:], []]
-        )
-
-        SAMTOOLS_MERGE_BACKGROUND(
-            ch_background_samplesheet,
-            [[:], file(params.fasta)],
-            [[:], file(params.fasta_index)],
-            [[:], []]
-        )
-
-        BAM_TO_PILEUP_HARD_FILTER_TARGET(
-            ch_target_samplesheet,
-            file(params.fasta),
-            file(params.fasta_index),
-            file(params.known_sites_tsv),
-            file("${workflow.projectDir}/bin/bam_to_pileup.py"),
-            file("${workflow.projectDir}/bin/merge_pileups.py"),
-            file("${workflow.projectDir}/bin/split_site_tsv.py")
-        )
-        BAM_TO_PILEUP_HARD_FILTER_TARGET.out.pileup
-            .set { ch_target_pileup_samplesheet }
-
-        BAM_TO_PILEUP_HARD_FILTER_BACKGROUND(
-            ch_background_samplesheet,
-            file(params.fasta),
-            file(params.fasta_index),
-            file(params.known_sites_tsv),
-            file("${workflow.projectDir}/bin/bam_to_pileup.py"),
-            file("${workflow.projectDir}/bin/merge_pileups.py"),
-            file("${workflow.projectDir}/bin/split_site_tsv.py")
-        )
-        BAM_TO_PILEUP_HARD_FILTER_BACKGROUND.out.pileup
-            .set { ch_background_pileup_samplesheet }
-
-        ch_merged = ch_target_pileup_samplesheet.join(
-            ch_background_pileup_samplesheet,
-            by: [{it[0].id}, {it[0].id}]
-        ).map {meta_target, pileup_target, meta_background, pileup_background -> 
-            def new_meta = [id: meta_target.id]
-            return tuple(new_meta, pileup_target, pileup_background)
-        }
-        
-        MERGE_PILEUP_HARD_FILTER(
-            ch_merged,
-            file("${workflow.projectDir}/bin/merge_pileup_hard_filter.py")
-        )
-        MERGE_PILEUP_HARD_FILTER.out.pileup
-            .set { ch_pileup_samplesheet }
-
-        FILTER_PILEUP(
-            ch_pileup_samplesheet,
             file("${workflow.projectDir}/bin/filter_pileup.py")
         )
     } else {

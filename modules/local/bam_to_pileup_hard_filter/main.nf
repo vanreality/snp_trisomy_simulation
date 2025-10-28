@@ -6,12 +6,9 @@ process BAM_TO_PILEUP_HARD_FILTER {
     
     input:
     tuple val(meta), path(bamFiles, stageAs: "input_?.bam")
-    path(fasta)
-    path(fasta_index)
     path(known_sites_tsv)
     path(pileup_script)
     path(merge_script)
-    path(split_site_script)
     
     output:
     tuple val(meta), path("*_pileup.tsv.gz"), emit: pileup
@@ -24,55 +21,12 @@ process BAM_TO_PILEUP_HARD_FILTER {
         # Get base name for output files
         base=\$(basename \$bam .bam)
         
-        # Split the tsv file, output full_depth.bed, half_depth_ct.bed, half_depth_ga.bed
-        python ${split_site_script} ${known_sites_tsv}
-        
-        # Process full_depth regions if bed file is not empty
-        if [ -s full_depth.bed ]; then
-            # Extract regions for full depth analysis
-            samtools view -b -L full_depth.bed \$bam -o \${base}_full_depth.bam
-            samtools index \${base}_full_depth.bam
+        samtools index \${bam}
             
-            python ${pileup_script} \\
-              --input-bam \${base}_full_depth.bam \\
-              --known-sites ${known_sites_tsv} \\
-              --bed full_depth.bed \\
-              --output \${base}_full_depth
-        fi
-
-        # Process half_depth_ct regions if bed file is not empty
-        if [ -s half_depth_ct.bed ]; then
-            # Extract regions for half depth CT analysis
-            samtools view -b -L half_depth_ct.bed \$bam -o \${base}_half_depth_ct_regions.bam
-            samtools index \${base}_half_depth_ct_regions.bam
-            
-            # Split by CT flags (flag==99 || flag==147 || flag==0)
-            samtools view -b -e 'flag==99 || flag==147 || flag==0' \${base}_half_depth_ct_regions.bam -o \${base}_half_depth_ct.bam
-            samtools index \${base}_half_depth_ct.bam
-            
-            python ${pileup_script} \\
-              --input-bam \${base}_half_depth_ct.bam \\
-              --known-sites ${known_sites_tsv} \\
-              --bed half_depth_ct.bed \\
-              --output \${base}_half_depth_ct
-        fi
-        
-        # Process half_depth_ga regions if bed file is not empty
-        if [ -s half_depth_ga.bed ]; then
-            # Extract regions for half depth GA analysis
-            samtools view -b -L half_depth_ga.bed \$bam -o \${base}_half_depth_ga_regions.bam
-            samtools index \${base}_half_depth_ga_regions.bam
-            
-            # Split by GA flags (flag==83 || flag==163 || flag==16)
-            samtools view -b -e 'flag==83 || flag==163 || flag==16' \${base}_half_depth_ga_regions.bam -o \${base}_half_depth_ga.bam
-            samtools index \${base}_half_depth_ga.bam
-            
-            python ${pileup_script} \\
-              --input-bam \${base}_half_depth_ga.bam \\
-              --known-sites ${known_sites_tsv} \\
-              --bed half_depth_ga.bed \\
-              --output \${base}_half_depth_ga
-        fi
+        python ${pileup_script} \\
+          --input-bam \${bam} \\
+          --known-sites ${known_sites_tsv} \\
+          --output \${base}
     done
 
     # Merge all intermediate TSV outputs into final file
@@ -81,11 +35,6 @@ process BAM_TO_PILEUP_HARD_FILTER {
       --output ${prefix}_pileup.tsv.gz
 
     # Remove intermediate files
-    rm -f full_depth.bed half_depth_ct.bed half_depth_ga.bed
-    rm -f input*_full_depth.bam input*_half_depth_ct*.bam input*_half_depth_ga*.bam
-    rm -f *.bai
-    rm -f *.csi
-    rm -f input*.vcf.gz input*.tsv.gz
-    rm -f sample_name.txt
+    rm -f input*_pileup.tsv.gz
     """
 }
