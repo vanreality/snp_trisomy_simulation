@@ -312,29 +312,10 @@ def process_pileup_site(bam_file: pysam.AlignmentFile, site: SNPSite,
                 # Apply bisulfite-specific flag filtering based on SNP type
                 # Extract the core SAM flag (excluding paired-end flags)
                 read_flag = read.flag
-                
-                # Determine effective flag for bisulfite filtering
-                # We care about the strand orientation
-                if read.is_reverse:
-                    # Reverse strand alignment
-                    if read.is_read1:
-                        effective_flag = 83  # First in pair, reverse strand
-                    elif read.is_read2:
-                        effective_flag = 163  # Second in pair, reverse strand (but forward original)
-                    else:
-                        effective_flag = 16  # Single-end or unmapped pair, reverse strand
-                else:
-                    # Forward strand alignment
-                    if read.is_read1:
-                        effective_flag = 99  # First in pair, forward strand
-                    elif read.is_read2:
-                        effective_flag = 147  # Second in pair, forward strand (but reverse original)
-                    else:
-                        effective_flag = 0  # Single-end or unmapped pair, forward strand
-                
+
                 # Apply flag filtering if this SNP type requires it
                 if allowed_flags is not None:
-                    if effective_flag not in allowed_flags:
+                    if read_flag not in allowed_flags:
                         continue  # Skip reads with disallowed flags for this SNP type
                 
                 # Skip deletions, reference skips, and insertions
