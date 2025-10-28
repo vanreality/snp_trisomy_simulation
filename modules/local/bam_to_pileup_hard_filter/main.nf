@@ -15,7 +15,6 @@ process BAM_TO_PILEUP_HARD_FILTER {
     
     script:
     def prefix = task.ext.prefix ?: "${meta.id}_${meta.label}"
-    def ncpus = task.ext.ncpus ?: 4
     """
     # Process each BAM file
     for bam in input*.bam; do
@@ -28,7 +27,7 @@ process BAM_TO_PILEUP_HARD_FILTER {
           --input-bam \${bam} \\
           --known-sites ${known_sites_tsv} \\
           --output \${base} \\
-          --ncpus \${ncpus}
+          --ncpus \${task.cpus}
     done
 
     # Merge all intermediate TSV outputs into final file
