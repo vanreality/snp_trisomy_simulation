@@ -27,7 +27,7 @@ process BAM_TO_PILEUP_PROB_WEIGHTED {
           --input-txt \${base}.txt \\
           --known-sites ${known_sites_tsv} \\
           --output \${base} \\
-          --ncpus \${task.cpus}
+          --ncpus ${task.cpus}
     done
 
     # Merge all intermediate TSV outputs into final file
