@@ -121,13 +121,13 @@ workflow {
             }
             .set { ch_bam_samplesheet }
 
-        BAM_TO_PILEUP_HARD_FILTER(
+        BAM_TO_PILEUP_HARD_FILTER_TARGET(
             ch_bam_samplesheet,
             file(params.known_sites_tsv),
             file("${workflow.projectDir}/bin/bam_to_pileup_hard_filter.py"),
             file("${workflow.projectDir}/bin/merge_pileups.py")
         )
-        BAM_TO_PILEUP_HARD_FILTER.out.pileup
+        BAM_TO_PILEUP_HARD_FILTER_TARGET.out.pileup
             .set { ch_pileup_samplesheet }
     } else if (params.input_txt_samplesheet && params.filter_mode == "hard_filter") {
         SPLIT_BAM_BY_TXT(
