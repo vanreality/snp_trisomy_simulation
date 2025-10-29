@@ -11,10 +11,9 @@ process BAM_TO_PILEUP_HARD_FILTER {
     path(merge_script)
     
     output:
-    tuple val(meta), path("*_pileup.tsv.gz"), emit: pileup
+    tuple val(meta.id as String), path("${meta.id}_${meta.label}_pileup.tsv.gz"), emit: pileup
     
     script:
-    def prefix = task.ext.prefix ?: "${meta.id}_${meta.label}"
     """
     # Process each BAM file
     for bam in input*.bam; do
@@ -33,7 +32,7 @@ process BAM_TO_PILEUP_HARD_FILTER {
     # Merge all intermediate TSV outputs into final file
     python ${merge_script} \\
       --inputs "\$(ls *_pileup.tsv.gz | tr '\\n' ' ')" \\
-      --output ${prefix}_pileup.tsv.gz
+      --output ${meta.id}_${meta.label}_pileup.tsv.gz
 
     # Remove intermediate files
     rm -f input*_pileup.tsv.gz
