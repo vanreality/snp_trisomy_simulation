@@ -185,10 +185,17 @@ workflow {
         BAM_TO_PILEUP_HARD_FILTER_BACKGROUND.out.pileup
             .set { ch_background_pileup_samplesheet }
 
-        ch_merged = ch_target_pileup_samplesheet.join(
-            ch_background_pileup_samplesheet,
+        ch_target_pileup_samplesheet.map { meta, pileup ->
+            tuple(meta.id as String, meta, pileup)
+        }.set { ch_target_pileup_samplesheet_mapped }
+        ch_background_pileup_samplesheet.map { meta, pileup ->
+            tuple(meta.id as String, meta, pileup)
+        }.set { ch_background_pileup_samplesheet_mapped }
+
+        ch_merged = ch_target_pileup_samplesheet_mapped.join(
+            ch_background_pileup_samplesheet_mapped,
             by: 0
-        ).map {key, pileup_target, pileup_background -> 
+        ).map {key, mt, pileup_target, mb, pileup_background -> 
             def new_meta = [id: key]
             return tuple(new_meta, pileup_target, pileup_background)
         }

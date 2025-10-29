@@ -11,7 +11,7 @@ process BAM_TO_PILEUP_HARD_FILTER {
     path(merge_script)
     
     output:
-    tuple val(meta.id as String), path("*_pileup.tsv.gz"), emit: pileup
+    tuple val(meta), path("*_pileup.tsv.gz"), emit: pileup
     
     script:
     """
