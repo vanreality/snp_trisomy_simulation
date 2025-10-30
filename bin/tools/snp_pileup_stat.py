@@ -10,6 +10,8 @@ import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 import click
 import pandas as pd
@@ -20,6 +22,7 @@ from rich.table import Table
 from rich import box
 
 console = Console()
+progress_lock = Lock()
 
 
 def calculate_bam_mean_depth(bam_path: Path) -> float:
@@ -198,17 +201,19 @@ def find_samples(input_dir: Path) -> List[str]:
 def process_sample(
     sample: str,
     input_dir: Path,
-    progress: Progress,
-    task_id: int
+    progress: Optional[Progress] = None,
+    task_id: Optional[int] = None
 ) -> Dict[str, any]:
     """
     Process a single sample to calculate all statistics.
     
+    Thread-safe function that can be called in parallel.
+    
     Args:
         sample: Sample name to process.
         input_dir: Root directory containing subdirectories with data files.
-        progress: Rich Progress object for updating progress.
-        task_id: Task ID for progress tracking.
+        progress: Rich Progress object for updating progress (optional).
+        task_id: Task ID for progress tracking (optional).
         
     Returns:
         Dictionary containing all statistics for the sample.
@@ -218,33 +223,44 @@ def process_sample(
     """
     result = {'sample': sample}
     
+    def update_progress(description: str):
+        """Thread-safe progress update."""
+        if progress is not None and task_id is not None:
+            with progress_lock:
+                progress.update(task_id, description=description)
+    
+    def print_warning(message: str):
+        """Thread-safe console print."""
+        with progress_lock:
+            console.print(message)
+    
     try:
         # Process target BAM
         target_bam = input_dir / "samtools_merge_target" / f"{sample}_target.bam"
         if target_bam.exists():
-            progress.update(task_id, description=f"[cyan]Processing {sample} - target BAM")
+            update_progress(f"[cyan]Processing {sample} - target BAM")
             result['target_mean_depth'] = calculate_bam_mean_depth(target_bam)
         else:
-            console.print(f"[yellow]Warning: Target BAM not found for {sample}")
+            print_warning(f"[yellow]Warning: Target BAM not found for {sample}")
             result['target_mean_depth'] = float('nan')
         
         # Process background BAM
         background_bam = input_dir / "samtools_merge_background" / f"{sample}_background.bam"
         if background_bam.exists():
-            progress.update(task_id, description=f"[cyan]Processing {sample} - background BAM")
+            update_progress(f"[cyan]Processing {sample} - background BAM")
             result['background_mean_depth'] = calculate_bam_mean_depth(background_bam)
         else:
-            console.print(f"[yellow]Warning: Background BAM not found for {sample}")
+            print_warning(f"[yellow]Warning: Background BAM not found for {sample}")
             result['background_mean_depth'] = float('nan')
         
         # Process pileup file
         pileup_file = input_dir / "merge_pileup_hard_filter" / f"{sample}_pileup.tsv.gz"
         if pileup_file.exists():
-            progress.update(task_id, description=f"[cyan]Processing {sample} - pileup")
+            update_progress(f"[cyan]Processing {sample} - pileup")
             pileup_stats = calculate_pileup_statistics(pileup_file)
             result.update(pileup_stats)
         else:
-            console.print(f"[yellow]Warning: Pileup file not found for {sample}")
+            print_warning(f"[yellow]Warning: Pileup file not found for {sample}")
             # Set all pileup stats to NaN
             pileup_keys = [
                 'covered_snp_ratio', 'covered_snp_mean_depth',
@@ -255,10 +271,10 @@ def process_sample(
             for key in pileup_keys:
                 result[key] = float('nan')
         
-        progress.update(task_id, description=f"[green]✓ Completed {sample}")
+        update_progress(f"[green]✓ Completed {sample}")
         
     except Exception as e:
-        console.print(f"[red]Error processing sample {sample}: {str(e)}")
+        print_warning(f"[red]Error processing sample {sample}: {str(e)}")
         # Fill with NaN values on error
         for key in ['target_mean_depth', 'background_mean_depth', 'covered_snp_ratio',
                     'covered_snp_mean_depth', 'snp_gt_60x', 'snp_gt_100x', 'snp_gt_200x',
@@ -316,23 +332,34 @@ def display_summary_table(df: pd.DataFrame) -> None:
     required=True,
     help='Prefix for output TSV file. Output will be saved as {prefix}.tsv'
 )
-def main(input_dir: Path, output_prefix: str) -> None:
+@click.option(
+    '--ncpus',
+    type=int,
+    default=1,
+    show_default=True,
+    help='Number of CPU threads to use for parallel processing.'
+)
+def main(input_dir: Path, output_prefix: str, ncpus: int) -> None:
     """
     Calculate comprehensive statistics from BAM and SNP pileup files.
     
     This script processes BAM files to calculate mean depth coverage and pileup files
     to calculate SNP statistics including VAF distributions and informative SNP counts.
+    Supports parallel processing with multiple CPU threads for improved performance.
     
     Args:
         input_dir: Directory containing subdirectories with BAM and pileup files.
         output_prefix: Prefix for output TSV file.
+        ncpus: Number of CPU threads to use for parallel processing.
         
     Examples:
         $ python snp_pileup_stat.py --input_dir /path/to/data --output_prefix results
+        $ python snp_pileup_stat.py --input_dir /path/to/data --output_prefix results --ncpus 8
     """
     console.rule("[bold blue]SNP Pileup Statistics Calculator")
     console.print(f"[cyan]Input directory: {input_dir}")
     console.print(f"[cyan]Output prefix: {output_prefix}")
+    console.print(f"[cyan]CPU threads: {ncpus}")
     
     # Validate input directory structure
     required_dirs = [
@@ -361,7 +388,17 @@ def main(input_dir: Path, output_prefix: str) -> None:
     
     console.print(f"[green]Found {len(samples)} samples")
     
-    # Process all samples
+    # Validate ncpus value
+    if ncpus < 1:
+        console.print("[red]Error: --ncpus must be at least 1")
+        sys.exit(1)
+    
+    # Adjust ncpus if it exceeds the number of samples
+    effective_ncpus = min(ncpus, len(samples))
+    if effective_ncpus < ncpus:
+        console.print(f"[yellow]Note: Using {effective_ncpus} threads (limited by number of samples)")
+    
+    # Process all samples with multi-threading
     results = []
     
     with Progress(
@@ -373,10 +410,40 @@ def main(input_dir: Path, output_prefix: str) -> None:
     ) as progress:
         task = progress.add_task("[cyan]Processing samples...", total=len(samples))
         
-        for sample in samples:
-            result = process_sample(sample, input_dir, progress, task)
-            results.append(result)
-            progress.advance(task)
+        if ncpus == 1:
+            # Single-threaded processing for ncpus=1
+            for sample in samples:
+                result = process_sample(sample, input_dir, progress, task)
+                results.append(result)
+                progress.advance(task)
+        else:
+            # Multi-threaded processing
+            with ThreadPoolExecutor(max_workers=effective_ncpus) as executor:
+                # Submit all tasks
+                future_to_sample = {
+                    executor.submit(process_sample, sample, input_dir, progress, task): sample
+                    for sample in samples
+                }
+                
+                # Collect results as they complete
+                for future in as_completed(future_to_sample):
+                    sample = future_to_sample[future]
+                    try:
+                        result = future.result()
+                        results.append(result)
+                    except Exception as e:
+                        with progress_lock:
+                            console.print(f"[red]Failed to process sample {sample}: {str(e)}")
+                        # Add a failed result with NaN values
+                        failed_result = {'sample': sample}
+                        for key in ['target_mean_depth', 'background_mean_depth', 'covered_snp_ratio',
+                                    'covered_snp_mean_depth', 'snp_gt_60x', 'snp_gt_100x', 'snp_gt_200x',
+                                    'snp_vaf_eq_0', 'snp_vaf_0_to_0.2', 'snp_vaf_0.2_to_0.8',
+                                    'snp_vaf_0.8_to_1', 'snp_vaf_eq_1', 'informative_snp_count']:
+                            failed_result[key] = float('nan')
+                        results.append(failed_result)
+                    finally:
+                        progress.advance(task)
     
     # Create DataFrame with results
     df = pd.DataFrame(results)
