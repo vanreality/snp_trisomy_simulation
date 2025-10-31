@@ -98,7 +98,7 @@ def calculate_pileup_statistics(pileup_path: Path) -> Dict[str, float]:
         df = pd.read_csv(pileup_path, sep='\t', compression='gzip' if str(pileup_path).endswith('.gz') else None)
         
         # Verify required columns exist
-        required_columns = ['cfDNA_alt_reads', 'current_depth']
+        required_columns = ['cfDNA_alt_reads', 'current_depth', 'fetal_current_depth_from_model', 'maternal_current_depth']
         missing_columns = [col for col in required_columns if col not in df.columns]
         if missing_columns:
             raise ValueError(f"Missing required columns: {missing_columns}")
@@ -117,6 +117,8 @@ def calculate_pileup_statistics(pileup_path: Path) -> Dict[str, float]:
         stats = {
             'covered_snp_ratio': covered_snps / total_snps if total_snps > 0 else 0.0,
             'covered_snp_mean_depth': df.loc[mask_nonzero_depth, 'current_depth'].mean() if covered_snps > 0 else 0.0,
+            'fetal_covered_snp_mean_depth': df.loc[mask_nonzero_depth, 'fetal_current_depth_from_model'].mean() if covered_snps > 0 else 0.0,
+            'maternal_covered_snp_mean_depth': df.loc[mask_nonzero_depth, 'maternal_current_depth'].mean() if covered_snps > 0 else 0.0,
             'snp_gt_60x': (df['current_depth'] > 60).sum(),
             'snp_gt_100x': (df['current_depth'] > 100).sum(),
             'snp_gt_200x': (df['current_depth'] > 200).sum(),
@@ -129,8 +131,8 @@ def calculate_pileup_statistics(pileup_path: Path) -> Dict[str, float]:
         
         # Calculate informative SNP count (0 < VAF < 0.2 or 0.8 < VAF < 1)
         stats['informative_snp_count'] = (
-            ((df['vaf'] > 0.0) & (df['vaf'] < 0.2)) | 
-            ((df['vaf'] > 0.8) & (df['vaf'] < 1.0))
+            (((df['vaf'] > 0.0) & (df['vaf'] < 0.2)) | ((df['vaf'] > 0.8) & (df['vaf'] < 1.0))) &
+            (df['current_depth'] > 100)
         ).sum()
         
         return stats
@@ -201,6 +203,7 @@ def find_samples(input_dir: Path) -> List[str]:
 def process_sample(
     sample: str,
     input_dir: Path,
+    bam_depth_stat: bool = True,
     progress: Optional[Progress] = None,
     task_id: Optional[int] = None
 ) -> Dict[str, any]:
@@ -212,6 +215,7 @@ def process_sample(
     Args:
         sample: Sample name to process.
         input_dir: Root directory containing subdirectories with data files.
+        bam_depth_stat: Whether to calculate BAM depth statistics (default: True).
         progress: Rich Progress object for updating progress (optional).
         task_id: Task ID for progress tracking (optional).
         
@@ -235,23 +239,24 @@ def process_sample(
             console.print(message)
     
     try:
-        # Process target BAM
-        target_bam = input_dir / "samtools_merge_target" / f"{sample}_target.bam"
-        if target_bam.exists():
-            update_progress(f"[cyan]Processing {sample} - target BAM")
-            result['target_mean_depth'] = calculate_bam_mean_depth(target_bam)
-        else:
-            print_warning(f"[yellow]Warning: Target BAM not found for {sample}")
-            result['target_mean_depth'] = float('nan')
-        
-        # Process background BAM
-        background_bam = input_dir / "samtools_merge_background" / f"{sample}_background.bam"
-        if background_bam.exists():
-            update_progress(f"[cyan]Processing {sample} - background BAM")
-            result['background_mean_depth'] = calculate_bam_mean_depth(background_bam)
-        else:
-            print_warning(f"[yellow]Warning: Background BAM not found for {sample}")
-            result['background_mean_depth'] = float('nan')
+        # Process target BAM (optional based on bam_depth_stat flag)
+        if bam_depth_stat:
+            target_bam = input_dir / "samtools_merge_target" / f"{sample}_target.bam"
+            if target_bam.exists():
+                update_progress(f"[cyan]Processing {sample} - target BAM")
+                result['target_mean_depth'] = calculate_bam_mean_depth(target_bam)
+            else:
+                print_warning(f"[yellow]Warning: Target BAM not found for {sample}")
+                result['target_mean_depth'] = float('nan')
+            
+            # Process background BAM
+            background_bam = input_dir / "samtools_merge_background" / f"{sample}_background.bam"
+            if background_bam.exists():
+                update_progress(f"[cyan]Processing {sample} - background BAM")
+                result['background_mean_depth'] = calculate_bam_mean_depth(background_bam)
+            else:
+                print_warning(f"[yellow]Warning: Background BAM not found for {sample}")
+                result['background_mean_depth'] = float('nan')
         
         # Process pileup file
         pileup_file = input_dir / "merge_pileup_hard_filter" / f"{sample}_pileup.tsv.gz"
@@ -339,7 +344,14 @@ def display_summary_table(df: pd.DataFrame) -> None:
     show_default=True,
     help='Number of CPU threads to use for parallel processing.'
 )
-def main(input_dir: Path, output_prefix: str, ncpus: int) -> None:
+@click.option(
+    '--bam_depth_stat',
+    type=bool,
+    default=True,
+    show_default=True,
+    help='Whether to calculate BAM depth statistics (target_mean_depth and background_mean_depth). Set to False to skip BAM processing.'
+)
+def main(input_dir: Path, output_prefix: str, ncpus: int, bam_depth_stat: bool) -> None:
     """
     Calculate comprehensive statistics from BAM and SNP pileup files.
     
@@ -351,15 +363,18 @@ def main(input_dir: Path, output_prefix: str, ncpus: int) -> None:
         input_dir: Directory containing subdirectories with BAM and pileup files.
         output_prefix: Prefix for output TSV file.
         ncpus: Number of CPU threads to use for parallel processing.
+        bam_depth_stat: Whether to calculate BAM depth statistics (default: True).
         
     Examples:
         $ python snp_pileup_stat.py --input_dir /path/to/data --output_prefix results
         $ python snp_pileup_stat.py --input_dir /path/to/data --output_prefix results --ncpus 8
+        $ python snp_pileup_stat.py --input_dir /path/to/data --output_prefix results --bam_depth_stat False
     """
     console.rule("[bold blue]SNP Pileup Statistics Calculator")
     console.print(f"[cyan]Input directory: {input_dir}")
     console.print(f"[cyan]Output prefix: {output_prefix}")
     console.print(f"[cyan]CPU threads: {ncpus}")
+    console.print(f"[cyan]BAM depth statistics: {bam_depth_stat}")
     
     # Validate input directory structure
     required_dirs = [
@@ -413,7 +428,7 @@ def main(input_dir: Path, output_prefix: str, ncpus: int) -> None:
         if ncpus == 1:
             # Single-threaded processing for ncpus=1
             for sample in samples:
-                result = process_sample(sample, input_dir, progress, task)
+                result = process_sample(sample, input_dir, bam_depth_stat, progress, task)
                 results.append(result)
                 progress.advance(task)
         else:
@@ -421,7 +436,7 @@ def main(input_dir: Path, output_prefix: str, ncpus: int) -> None:
             with ThreadPoolExecutor(max_workers=effective_ncpus) as executor:
                 # Submit all tasks
                 future_to_sample = {
-                    executor.submit(process_sample, sample, input_dir, progress, task): sample
+                    executor.submit(process_sample, sample, input_dir, bam_depth_stat, progress, task): sample
                     for sample in samples
                 }
                 
@@ -449,10 +464,14 @@ def main(input_dir: Path, output_prefix: str, ncpus: int) -> None:
     df = pd.DataFrame(results)
     
     # Reorder columns for better readability
-    column_order = [
-        'sample',
-        'target_mean_depth',
-        'background_mean_depth',
+    column_order = ['sample']
+    
+    # Add BAM depth columns only if bam_depth_stat is True
+    if bam_depth_stat:
+        column_order.extend(['target_mean_depth', 'background_mean_depth'])
+    
+    # Add remaining columns
+    column_order.extend([
         'covered_snp_ratio',
         'covered_snp_mean_depth',
         'snp_gt_60x',
@@ -464,7 +483,7 @@ def main(input_dir: Path, output_prefix: str, ncpus: int) -> None:
         'snp_vaf_0.8_to_1',
         'snp_vaf_eq_1',
         'informative_snp_count'
-    ]
+    ])
     
     # Only include columns that exist in the dataframe
     column_order = [col for col in column_order if col in df.columns]
