@@ -268,7 +268,8 @@ def process_sample(
             print_warning(f"[yellow]Warning: Pileup file not found for {sample}")
             # Set all pileup stats to NaN
             pileup_keys = [
-                'covered_snp_ratio', 'covered_snp_mean_depth',
+                'covered_snp_ratio', 'covered_snp_mean_depth', 
+                'fetal_covered_snp_mean_depth', 'maternal_covered_snp_mean_depth',
                 'snp_gt_60x', 'snp_gt_100x', 'snp_gt_200x',
                 'snp_vaf_eq_0', 'snp_vaf_0_to_0.2', 'snp_vaf_0.2_to_0.8',
                 'snp_vaf_0.8_to_1', 'snp_vaf_eq_1', 'informative_snp_count'
@@ -282,7 +283,8 @@ def process_sample(
         print_warning(f"[red]Error processing sample {sample}: {str(e)}")
         # Fill with NaN values on error
         for key in ['target_mean_depth', 'background_mean_depth', 'covered_snp_ratio',
-                    'covered_snp_mean_depth', 'snp_gt_60x', 'snp_gt_100x', 'snp_gt_200x',
+                    'covered_snp_mean_depth', 'fetal_covered_snp_mean_depth', 'maternal_covered_snp_mean_depth',
+                    'snp_gt_60x', 'snp_gt_100x', 'snp_gt_200x',
                     'snp_vaf_eq_0', 'snp_vaf_0_to_0.2', 'snp_vaf_0.2_to_0.8',
                     'snp_vaf_0.8_to_1', 'snp_vaf_eq_1', 'informative_snp_count']:
             if key not in result:
@@ -452,7 +454,8 @@ def main(input_dir: Path, output_prefix: str, ncpus: int, bam_depth_stat: bool) 
                         # Add a failed result with NaN values
                         failed_result = {'sample': sample}
                         for key in ['target_mean_depth', 'background_mean_depth', 'covered_snp_ratio',
-                                    'covered_snp_mean_depth', 'snp_gt_60x', 'snp_gt_100x', 'snp_gt_200x',
+                                    'covered_snp_mean_depth', 'fetal_covered_snp_mean_depth', 'maternal_covered_snp_mean_depth',
+                                    'snp_gt_60x', 'snp_gt_100x', 'snp_gt_200x',
                                     'snp_vaf_eq_0', 'snp_vaf_0_to_0.2', 'snp_vaf_0.2_to_0.8',
                                     'snp_vaf_0.8_to_1', 'snp_vaf_eq_1', 'informative_snp_count']:
                             failed_result[key] = float('nan')
@@ -474,6 +477,8 @@ def main(input_dir: Path, output_prefix: str, ncpus: int, bam_depth_stat: bool) 
     column_order.extend([
         'covered_snp_ratio',
         'covered_snp_mean_depth',
+        'fetal_covered_snp_mean_depth',
+        'maternal_covered_snp_mean_depth',
         'snp_gt_60x',
         'snp_gt_100x',
         'snp_gt_200x',
