@@ -79,6 +79,9 @@ def calculate_pileup_statistics(pileup_path: Path) -> Dict[str, float]:
         - snp_gt_60x: Count of SNPs with depth > 60
         - snp_gt_100x: Count of SNPs with depth > 100
         - snp_gt_200x: Count of SNPs with depth > 200
+        - snp_gt_300x: Count of SNPs with depth > 300
+        - snp_gt_300x_chr16: Count of SNPs with depth > 300 on chromosome 16
+        - snp_gt_300x_chr21: Count of SNPs with depth > 300 on chromosome 21
         - snp_vaf_eq_0: Count of SNPs with VAF = 0
         - snp_vaf_0_to_0.2: Count of SNPs with 0 < VAF < 0.2
         - snp_vaf_0.2_to_0.8: Count of SNPs with 0.2 <= VAF <= 0.8
@@ -103,6 +106,14 @@ def calculate_pileup_statistics(pileup_path: Path) -> Dict[str, float]:
         if missing_columns:
             raise ValueError(f"Missing required columns: {missing_columns}")
         
+        # Detect chromosome column name (try common variations)
+        chrom_col = None
+        possible_chrom_cols = ['chr', 'chrom', 'chromosome', 'Chromosome', 'Chr', 'CHROM']
+        for col in possible_chrom_cols:
+            if col in df.columns:
+                chrom_col = col
+                break
+        
         # Calculate VAF (handle division by zero)
         df['vaf'] = 0.0
         mask_nonzero_depth = df['current_depth'] > 0
@@ -113,7 +124,7 @@ def calculate_pileup_statistics(pileup_path: Path) -> Dict[str, float]:
         total_snps = len(df)
         covered_snps = mask_nonzero_depth.sum()
         
-        # Calculate statistics
+        # Calculate basic depth statistics
         stats = {
             'covered_snp_ratio': covered_snps / total_snps if total_snps > 0 else 0.0,
             'covered_snp_mean_depth': df.loc[mask_nonzero_depth, 'current_depth'].mean() if covered_snps > 0 else 0.0,
@@ -122,14 +133,32 @@ def calculate_pileup_statistics(pileup_path: Path) -> Dict[str, float]:
             'snp_gt_60x': (df['current_depth'] > 60).sum(),
             'snp_gt_100x': (df['current_depth'] > 100).sum(),
             'snp_gt_200x': (df['current_depth'] > 200).sum(),
+            'snp_gt_300x': (df['current_depth'] > 300).sum(),
+        }
+        
+        # Calculate chromosome-specific statistics if chromosome column exists
+        if chrom_col is not None:
+            # Normalize chromosome values to handle variations (chr16, 16, Chr16, etc.)
+            df['chrom_normalized'] = df[chrom_col].astype(str).str.replace('chr', '', case=False, regex=False)
+            
+            # Calculate SNPs with depth > 300x for specific chromosomes
+            stats['snp_gt_300x_chr16'] = ((df['current_depth'] > 300) & (df['chrom_normalized'] == '16')).sum()
+            stats['snp_gt_300x_chr21'] = ((df['current_depth'] > 300) & (df['chrom_normalized'] == '21')).sum()
+        else:
+            # If chromosome column not found, set these statistics to 0
+            stats['snp_gt_300x_chr16'] = 0
+            stats['snp_gt_300x_chr21'] = 0
+        
+        # Calculate VAF distribution statistics
+        stats.update({
             'snp_vaf_eq_0': (df['vaf'] == 0.0).sum(),
             'snp_vaf_0_to_0.2': ((df['vaf'] > 0.0) & (df['vaf'] < 0.2)).sum(),
             'snp_vaf_0.2_to_0.8': ((df['vaf'] >= 0.2) & (df['vaf'] <= 0.8)).sum(),
             'snp_vaf_0.8_to_1': ((df['vaf'] > 0.8) & (df['vaf'] < 1.0)).sum(),
             'snp_vaf_eq_1': (df['vaf'] == 1.0).sum(),
-        }
+        })
         
-        # Calculate informative SNP count (0 < VAF < 0.2 or 0.8 < VAF < 1)
+        # Calculate informative SNP count (0 < VAF < 0.2 or 0.8 < VAF < 1, with depth > 100)
         stats['informative_snp_count'] = (
             (((df['vaf'] > 0.0) & (df['vaf'] < 0.2)) | ((df['vaf'] > 0.8) & (df['vaf'] < 1.0))) &
             (df['current_depth'] > 100)
@@ -270,7 +299,8 @@ def process_sample(
             pileup_keys = [
                 'covered_snp_ratio', 'covered_snp_mean_depth', 
                 'fetal_covered_snp_mean_depth', 'maternal_covered_snp_mean_depth',
-                'snp_gt_60x', 'snp_gt_100x', 'snp_gt_200x',
+                'snp_gt_60x', 'snp_gt_100x', 'snp_gt_200x', 'snp_gt_300x',
+                'snp_gt_300x_chr16', 'snp_gt_300x_chr21',
                 'snp_vaf_eq_0', 'snp_vaf_0_to_0.2', 'snp_vaf_0.2_to_0.8',
                 'snp_vaf_0.8_to_1', 'snp_vaf_eq_1', 'informative_snp_count'
             ]
@@ -284,7 +314,8 @@ def process_sample(
         # Fill with NaN values on error
         for key in ['target_mean_depth', 'background_mean_depth', 'covered_snp_ratio',
                     'covered_snp_mean_depth', 'fetal_covered_snp_mean_depth', 'maternal_covered_snp_mean_depth',
-                    'snp_gt_60x', 'snp_gt_100x', 'snp_gt_200x',
+                    'snp_gt_60x', 'snp_gt_100x', 'snp_gt_200x', 'snp_gt_300x',
+                    'snp_gt_300x_chr16', 'snp_gt_300x_chr21',
                     'snp_vaf_eq_0', 'snp_vaf_0_to_0.2', 'snp_vaf_0.2_to_0.8',
                     'snp_vaf_0.8_to_1', 'snp_vaf_eq_1', 'informative_snp_count']:
             if key not in result:
@@ -455,7 +486,8 @@ def main(input_dir: Path, output_prefix: str, ncpus: int, bam_depth_stat: bool) 
                         failed_result = {'sample': sample}
                         for key in ['target_mean_depth', 'background_mean_depth', 'covered_snp_ratio',
                                     'covered_snp_mean_depth', 'fetal_covered_snp_mean_depth', 'maternal_covered_snp_mean_depth',
-                                    'snp_gt_60x', 'snp_gt_100x', 'snp_gt_200x',
+                                    'snp_gt_60x', 'snp_gt_100x', 'snp_gt_200x', 'snp_gt_300x',
+                                    'snp_gt_300x_chr16', 'snp_gt_300x_chr21',
                                     'snp_vaf_eq_0', 'snp_vaf_0_to_0.2', 'snp_vaf_0.2_to_0.8',
                                     'snp_vaf_0.8_to_1', 'snp_vaf_eq_1', 'informative_snp_count']:
                             failed_result[key] = float('nan')
@@ -482,6 +514,9 @@ def main(input_dir: Path, output_prefix: str, ncpus: int, bam_depth_stat: bool) 
         'snp_gt_60x',
         'snp_gt_100x',
         'snp_gt_200x',
+        'snp_gt_300x',
+        'snp_gt_300x_chr16',
+        'snp_gt_300x_chr21',
         'snp_vaf_eq_0',
         'snp_vaf_0_to_0.2',
         'snp_vaf_0.2_to_0.8',
