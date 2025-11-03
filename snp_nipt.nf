@@ -12,6 +12,7 @@ include { MERGE_PILEUP_HARD_FILTER } from './modules/local/merge_pileup_hard_fil
 include { FILTER_PILEUP } from './modules/local/filter_pileup/main.nf'
 include { SAMTOOLS_MERGE as SAMTOOLS_MERGE_TARGET } from './modules/nf-core/samtools/merge/main.nf'
 include { SAMTOOLS_MERGE as SAMTOOLS_MERGE_BACKGROUND } from './modules/nf-core/samtools/merge/main.nf'
+include { SAMTOOLS_MERGE as SAMTOOLS_MERGE_UNCLASSIFIED } from './modules/nf-core/samtools/merge/main.nf'
 
 workflow {
     // 1. Input samplesheet(txt, bam, parquet) processing
@@ -153,6 +154,15 @@ workflow {
             }
             .set { ch_background_samplesheet }
 
+        SPLIT_BAM_BY_TXT.out.unclassified
+            .groupTuple(by: 0)
+            .map { meta, unclassified ->
+                def new_meta = [id: meta.id, label: "unclassified"]
+                def bamList = unclassified.toList()
+                return tuple(new_meta, bamList)
+            }
+            .set { ch_unclassified_samplesheet }
+
         SAMTOOLS_MERGE_TARGET(
             ch_target_samplesheet,
             [[:], file(params.fasta)],
@@ -162,6 +172,13 @@ workflow {
         
         SAMTOOLS_MERGE_BACKGROUND(
             ch_background_samplesheet,
+            [[:], file(params.fasta)],
+            [[:], file(params.fasta_index)],
+            [[:], []]
+        )
+
+        SAMTOOLS_MERGE_UNCLASSIFIED(
+            ch_unclassified_samplesheet,
             [[:], file(params.fasta)],
             [[:], file(params.fasta_index)],
             [[:], []]
