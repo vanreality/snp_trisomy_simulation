@@ -194,17 +194,25 @@ class ReadClassification:
         within_region: Reads completely within BED regions.
         partial_overlap: Reads partially overlapping BED regions.
         outside_region: Reads not overlapping any BED regions.
-        pairs_one_in_one_out: Pairs with one mate in/overlapping and one outside.
-        pairs_both_out: Pairs with both mates outside all regions.
         total_pairs: Total number of read pairs processed.
+        pairs_both_in: Pairs with both mates completely within regions.
+        pairs_both_partial: Pairs with both mates partially overlapping regions.
+        pairs_both_out: Pairs with both mates outside all regions.
+        pairs_one_in_one_partial: Pairs with one mate within and one partially overlapping.
+        pairs_one_in_one_out: Pairs with one mate within and one outside.
+        pairs_one_partial_one_out: Pairs with one mate partially overlapping and one outside.
     """
     total_reads: int = 0
     within_region: int = 0
     partial_overlap: int = 0
     outside_region: int = 0
-    pairs_one_in_one_out: int = 0
-    pairs_both_out: int = 0
     total_pairs: int = 0
+    pairs_both_in: int = 0
+    pairs_both_partial: int = 0
+    pairs_both_out: int = 0
+    pairs_one_in_one_partial: int = 0
+    pairs_one_in_one_out: int = 0
+    pairs_one_partial_one_out: int = 0
     
     def to_dict(self) -> Dict[str, float]:
         """
@@ -220,7 +228,7 @@ class ReadClassification:
             'outside_region_count': self.outside_region,
         }
         
-        # Calculate proportions (avoid division by zero)
+        # Calculate read proportions (avoid division by zero)
         if self.total_reads > 0:
             result['within_region_proportion'] = self.within_region / self.total_reads
             result['partial_overlap_proportion'] = self.partial_overlap / self.total_reads
@@ -230,18 +238,30 @@ class ReadClassification:
             result['partial_overlap_proportion'] = 0.0
             result['outside_region_proportion'] = 0.0
         
-        # Add pair statistics
+        # Add pair statistics - total and counts
         result['total_pairs'] = self.total_pairs
-        result['pairs_one_in_one_out_count'] = self.pairs_one_in_one_out
+        result['pairs_both_in_count'] = self.pairs_both_in
+        result['pairs_both_partial_count'] = self.pairs_both_partial
         result['pairs_both_out_count'] = self.pairs_both_out
+        result['pairs_one_in_one_partial_count'] = self.pairs_one_in_one_partial
+        result['pairs_one_in_one_out_count'] = self.pairs_one_in_one_out
+        result['pairs_one_partial_one_out_count'] = self.pairs_one_partial_one_out
         
-        # Calculate pair proportions
+        # Calculate pair proportions (avoid division by zero)
         if self.total_pairs > 0:
-            result['pairs_one_in_one_out_proportion'] = self.pairs_one_in_one_out / self.total_pairs
+            result['pairs_both_in_proportion'] = self.pairs_both_in / self.total_pairs
+            result['pairs_both_partial_proportion'] = self.pairs_both_partial / self.total_pairs
             result['pairs_both_out_proportion'] = self.pairs_both_out / self.total_pairs
+            result['pairs_one_in_one_partial_proportion'] = self.pairs_one_in_one_partial / self.total_pairs
+            result['pairs_one_in_one_out_proportion'] = self.pairs_one_in_one_out / self.total_pairs
+            result['pairs_one_partial_one_out_proportion'] = self.pairs_one_partial_one_out / self.total_pairs
         else:
-            result['pairs_one_in_one_out_proportion'] = 0.0
+            result['pairs_both_in_proportion'] = 0.0
+            result['pairs_both_partial_proportion'] = 0.0
             result['pairs_both_out_proportion'] = 0.0
+            result['pairs_one_in_one_partial_proportion'] = 0.0
+            result['pairs_one_in_one_out_proportion'] = 0.0
+            result['pairs_one_partial_one_out_proportion'] = 0.0
         
         return result
 
@@ -330,7 +350,7 @@ def analyze_bam_file(
                 if read.is_paired:
                     read_pairs[read.query_name].append(read_class)
             
-            # Analyze read pairs
+            # Analyze read pairs - classify all possible mate combinations
             for read_name, classifications in read_pairs.items():
                 # Only process complete pairs (both mates present)
                 if len(classifications) == 2:
@@ -339,15 +359,23 @@ def analyze_bam_file(
                     mate1_class = classifications[0]
                     mate2_class = classifications[1]
                     
-                    # Check if one is in/overlapping and one is outside
-                    mate1_in_or_overlap = mate1_class in ['within', 'partial']
-                    mate2_in_or_overlap = mate2_class in ['within', 'partial']
+                    # Create a sorted tuple for consistent classification
+                    # This ensures (within, partial) and (partial, within) are treated the same
+                    pair_classes = tuple(sorted([mate1_class, mate2_class]))
                     
-                    if (mate1_in_or_overlap and not mate2_in_or_overlap) or \
-                       (mate2_in_or_overlap and not mate1_in_or_overlap):
-                        classification.pairs_one_in_one_out += 1
-                    elif not mate1_in_or_overlap and not mate2_in_or_overlap:
+                    # Classify the pair based on both mates' classifications
+                    if pair_classes == ('within', 'within'):
+                        classification.pairs_both_in += 1
+                    elif pair_classes == ('partial', 'partial'):
+                        classification.pairs_both_partial += 1
+                    elif pair_classes == ('outside', 'outside'):
                         classification.pairs_both_out += 1
+                    elif pair_classes == ('partial', 'within'):
+                        classification.pairs_one_in_one_partial += 1
+                    elif pair_classes == ('outside', 'within'):
+                        classification.pairs_one_in_one_out += 1
+                    elif pair_classes == ('outside', 'partial'):
+                        classification.pairs_one_partial_one_out += 1
         
         return classification
         
@@ -448,10 +476,18 @@ def process_sample(
             'partial_overlap_proportion': float('nan'),
             'outside_region_proportion': float('nan'),
             'total_pairs': 0,
-            'pairs_one_in_one_out_count': 0,
+            'pairs_both_in_count': 0,
+            'pairs_both_partial_count': 0,
             'pairs_both_out_count': 0,
-            'pairs_one_in_one_out_proportion': float('nan'),
+            'pairs_one_in_one_partial_count': 0,
+            'pairs_one_in_one_out_count': 0,
+            'pairs_one_partial_one_out_count': 0,
+            'pairs_both_in_proportion': float('nan'),
+            'pairs_both_partial_proportion': float('nan'),
             'pairs_both_out_proportion': float('nan'),
+            'pairs_one_in_one_partial_proportion': float('nan'),
+            'pairs_one_in_one_out_proportion': float('nan'),
+            'pairs_one_partial_one_out_proportion': float('nan'),
         })
     
     return result
@@ -472,15 +508,19 @@ def display_summary_table(df: pd.DataFrame) -> None:
     table.add_column("Min", style="yellow")
     table.add_column("Max", style="red")
     
-    # Select numeric columns for summary (exclude counts, show only proportions)
+    # Select key columns for summary display
     summary_cols = [
         'total_reads',
         'within_region_proportion',
         'partial_overlap_proportion',
         'outside_region_proportion',
         'total_pairs',
+        'pairs_both_in_proportion',
+        'pairs_both_partial_proportion',
+        'pairs_both_out_proportion',
+        'pairs_one_in_one_partial_proportion',
         'pairs_one_in_one_out_proportion',
-        'pairs_both_out_proportion'
+        'pairs_one_partial_one_out_proportion'
     ]
     
     for col in summary_cols:
@@ -635,10 +675,18 @@ def main(input_dir: Path, input_bed: Path, output_prefix: str, ncpus: int) -> No
                             'partial_overlap_proportion': float('nan'),
                             'outside_region_proportion': float('nan'),
                             'total_pairs': 0,
-                            'pairs_one_in_one_out_count': 0,
+                            'pairs_both_in_count': 0,
+                            'pairs_both_partial_count': 0,
                             'pairs_both_out_count': 0,
-                            'pairs_one_in_one_out_proportion': float('nan'),
+                            'pairs_one_in_one_partial_count': 0,
+                            'pairs_one_in_one_out_count': 0,
+                            'pairs_one_partial_one_out_count': 0,
+                            'pairs_both_in_proportion': float('nan'),
+                            'pairs_both_partial_proportion': float('nan'),
                             'pairs_both_out_proportion': float('nan'),
+                            'pairs_one_in_one_partial_proportion': float('nan'),
+                            'pairs_one_in_one_out_proportion': float('nan'),
+                            'pairs_one_partial_one_out_proportion': float('nan'),
                         }
                         results.append(failed_result)
                     finally:
@@ -658,10 +706,18 @@ def main(input_dir: Path, input_bed: Path, output_prefix: str, ncpus: int) -> No
         'outside_region_count',
         'outside_region_proportion',
         'total_pairs',
+        'pairs_both_in_count',
+        'pairs_both_in_proportion',
+        'pairs_both_partial_count',
+        'pairs_both_partial_proportion',
+        'pairs_both_out_count',
+        'pairs_both_out_proportion',
+        'pairs_one_in_one_partial_count',
+        'pairs_one_in_one_partial_proportion',
         'pairs_one_in_one_out_count',
         'pairs_one_in_one_out_proportion',
-        'pairs_both_out_count',
-        'pairs_both_out_proportion'
+        'pairs_one_partial_one_out_count',
+        'pairs_one_partial_one_out_proportion'
     ]
     
     # Only include columns that exist in the dataframe
