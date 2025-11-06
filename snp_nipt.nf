@@ -13,6 +13,7 @@ include { FILTER_PILEUP } from './modules/local/filter_pileup/main.nf'
 include { SAMTOOLS_MERGE as SAMTOOLS_MERGE_TARGET } from './modules/nf-core/samtools/merge/main.nf'
 include { SAMTOOLS_MERGE as SAMTOOLS_MERGE_BACKGROUND } from './modules/nf-core/samtools/merge/main.nf'
 include { SAMTOOLS_MERGE as SAMTOOLS_MERGE_UNCLASSIFIED } from './modules/nf-core/samtools/merge/main.nf'
+include { MERGE_TXT } from './modules/local/merge_txt/main.nf'
 
 workflow {
     // 1. Input samplesheet(txt, bam, parquet) processing
@@ -131,8 +132,29 @@ workflow {
         BAM_TO_PILEUP_HARD_FILTER_TARGET.out.pileup
             .set { ch_pileup_samplesheet }
     } else if (params.input_txt_samplesheet && params.filter_mode == "hard_filter") {
+        ch_txt_samplesheet.map {
+            meta, txtFile, bamFile ->
+            def groupKey = bamFile.toString()
+            return [groupKey, meta, txtFile, bamFile]
+        }.groupTuple(by: 0)
+            .map { groupKey, meta, txtFiles, bamFiles ->
+                def new_meta = meta.first()
+                def txtList = txtFiles.toList()
+                def bamFile = bamFiles.first()
+                return [new_meta, txtList, bamFile]
+            }
+            .set { ch_txt_samplesheet_grouped }
+
+        MERGE_TXT(
+            ch_txt_samplesheet_grouped,
+            file("${workflow.projectDir}/bin/merge_txt.py"),
+            params.ncpgs
+        )
+        MERGE_TXT.out.merged_txt
+            .set { ch_txt_samplesheet_merged }
+        
         SPLIT_BAM_BY_TXT(
-            ch_txt_samplesheet,
+            ch_txt_samplesheet_merged,
             params.threshold
         )
 
