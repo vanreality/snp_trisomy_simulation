@@ -10,10 +10,9 @@ include { BAM_TO_PILEUP_HARD_FILTER as BAM_TO_PILEUP_HARD_FILTER_BACKGROUND } fr
 include { BAM_TO_PILEUP_PROB_WEIGHTED } from './modules/local/bam_to_pileup_prob_weighted/main.nf'
 include { MERGE_PILEUP_HARD_FILTER } from './modules/local/merge_pileup_hard_filter/main.nf'
 include { FILTER_PILEUP } from './modules/local/filter_pileup/main.nf'
-include { SAMTOOLS_MERGE as SAMTOOLS_MERGE_TARGET } from './modules/nf-core/samtools/merge/main.nf'
-include { SAMTOOLS_MERGE as SAMTOOLS_MERGE_BACKGROUND } from './modules/nf-core/samtools/merge/main.nf'
-include { SAMTOOLS_MERGE as SAMTOOLS_MERGE_UNCLASSIFIED } from './modules/nf-core/samtools/merge/main.nf'
+include { SAMTOOLS_MERGE } from './modules/nf-core/samtools/merge/main.nf'
 include { MERGE_TXT } from './modules/local/merge_txt/main.nf'
+include { PICARD_MARKDUPLICATES } from './modules/nf-core/picard/markduplicates/main.nf'
 
 workflow {
     // 1. Input samplesheet(txt, bam, parquet) processing
@@ -53,7 +52,7 @@ workflow {
                 }
                 return [meta, txtFile, bamFile]
             }
-            .set { ch_txt_samplesheet }
+            .set { ch_samplesheet }
     } else if (params.input_parquet) {
         // Run split_parquet_by_sample process to split input parquet file by sample
         SPLIT_PARQUET_BY_SAMPLE(
@@ -132,7 +131,8 @@ workflow {
         BAM_TO_PILEUP_HARD_FILTER_TARGET.out.pileup
             .set { ch_pileup_samplesheet }
     } else if (params.input_txt_samplesheet && params.filter_mode == "hard_filter") {
-        ch_txt_samplesheet.map {
+        // Group by bam file and merge txt files
+        ch_samplesheet.map {
             meta, txtFile, bamFile ->
             def groupKey = bamFile.toString()
             return [groupKey, meta, txtFile, bamFile]
@@ -143,18 +143,69 @@ workflow {
                 def bamFile = bamFiles.first()
                 return [new_meta, txtList, bamFile]
             }
-            .set { ch_txt_samplesheet_grouped }
+            .set { ch_samplesheet_groupby_txt }
 
         MERGE_TXT(
-            ch_txt_samplesheet_grouped,
+            ch_samplesheet_groupby_txt,
             file("${workflow.projectDir}/bin/merge_txt.py"),
             params.ncpgs
         )
         MERGE_TXT.out.merged_txt
-            .set { ch_txt_samplesheet_merged }
+            .set { ch_samplesheet_txt_merged }
+
+        // Group by sample ,merge bam files and dedup bam files
+        ch_samplesheet_txt_merged.map {
+            meta, txtFile, bamFile ->
+            def groupKey = meta.id.toString()
+            return [groupKey, meta, txtFile, bamFile]
+        }.groupTuple(by: 0)
+            .map { groupKey, meta, txtFiles, bamFiles ->
+                def new_meta = meta.first()
+                def bamList = bamFiles.toList()
+                return [new_meta, bamList]
+            }
+            .set { ch_samplesheet_bam_grouped }
         
+        SAMTOOLS_MERGE(
+            ch_samplesheet_bam_grouped,
+            [[:], file(params.fasta)],
+            [[:], file(params.fasta_index)],
+            [[:], []]
+        )
+        SAMTOOLS_MERGE.out.bam
+            .set { ch_samplesheet_bam_merged }
+
+        PICARD_MARKDUPLICATES(
+            ch_samplesheet_bam_merged,
+            [[:], file(params.fasta)],
+            [[:], file(params.fasta_index)],
+        )
+        PICARD_MARKDUPLICATES.out.bam
+            .map { meta, bam ->
+                def groupKey = meta.id.toString()
+                return [groupKey, meta, bam]
+            }
+            .set { ch_samplesheet_bam_dedup }
+
+        ch_samplesheet_txt_merged.map {
+            meta, txtFile, bamFile ->
+            def groupKey = meta.id.toString()
+            return [groupKey, meta, txtFile]
+        }.groupTuple(by: 0)
+            .map { groupKey, meta, txtFiles ->
+                def new_meta = meta.first()
+                def txtFile = txtFiles.first()
+                return [groupKey, new_meta, txtFile]
+            }
+            .join(ch_samplesheet_bam_dedup, by: 0)
+            .map { key, meta_1, merged_txtFile, meta_2, merged_bamFile ->
+                return [meta_1, merged_txtFile, merged_bamFile]
+            }
+            .set { ch_final_samplesheet }
+
+        // Split bam by txt, into target, background, unclassified
         SPLIT_BAM_BY_TXT(
-            ch_txt_samplesheet_merged,
+            ch_final_samplesheet,
             params.threshold
         )
 
@@ -185,27 +236,7 @@ workflow {
             }
             .set { ch_unclassified_samplesheet }
 
-        SAMTOOLS_MERGE_TARGET(
-            ch_target_samplesheet,
-            [[:], file(params.fasta)],
-            [[:], file(params.fasta_index)],
-            [[:], []]
-        )
-        
-        SAMTOOLS_MERGE_BACKGROUND(
-            ch_background_samplesheet,
-            [[:], file(params.fasta)],
-            [[:], file(params.fasta_index)],
-            [[:], []]
-        )
-
-        SAMTOOLS_MERGE_UNCLASSIFIED(
-            ch_unclassified_samplesheet,
-            [[:], file(params.fasta)],
-            [[:], file(params.fasta_index)],
-            [[:], []]
-        )
-
+        // Pileup target
         BAM_TO_PILEUP_HARD_FILTER_TARGET(
             ch_target_samplesheet,
             file(params.known_sites_tsv),
@@ -215,6 +246,7 @@ workflow {
         BAM_TO_PILEUP_HARD_FILTER_TARGET.out.pileup
             .set { ch_target_pileup_samplesheet }
 
+        // Pileup background
         BAM_TO_PILEUP_HARD_FILTER_BACKGROUND(
             ch_background_samplesheet,
             file(params.known_sites_tsv),
@@ -224,6 +256,7 @@ workflow {
         BAM_TO_PILEUP_HARD_FILTER_BACKGROUND.out.pileup
             .set { ch_background_pileup_samplesheet }
 
+        // Merge pileup
         ch_target_pileup_samplesheet.map { meta, pileup ->
             tuple(meta.id as String, meta, pileup)
         }.set { ch_target_pileup_samplesheet_mapped }
@@ -251,7 +284,8 @@ workflow {
             file("${workflow.projectDir}/bin/filter_pileup.py")
         )
     } else if (params.input_txt_samplesheet && params.filter_mode == "prob_weighted") {
-        ch_txt_samplesheet.groupTuple(by: 0)
+        // TODO: Add merge/dedup bam files and merge txt files
+        ch_samplesheet.groupTuple(by: 0)
             .map { meta, txtFile, bamFile ->
                 def txtList = txtFile.toList()
                 def bamList = bamFile.toList()

@@ -5,6 +5,11 @@
     "https://github.com/nf-core/modules.git": {
       "modules": {
         "nf-core": {
+          "picard/markduplicates": {
+            "branch": "master",
+            "git_sha": "df124e87c74d8b40285199f8cc20151f5aa57255",
+            "installed_by": ["modules"]
+          },
           "samtools/merge": {
             "branch": "master",
             "git_sha": "c8be52dba1166c678e74cda9c3a3c221635c8bb1",
