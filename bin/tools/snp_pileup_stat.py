@@ -270,7 +270,7 @@ def process_sample(
     try:
         # Process target BAM (optional based on bam_depth_stat flag)
         if bam_depth_stat:
-            target_bam = input_dir / "samtools_merge_target" / f"{sample}_target.bam"
+            target_bam = input_dir / "split_bam_by_txt" / f"{sample}_target.bam"
             if target_bam.exists():
                 update_progress(f"[cyan]Processing {sample} - target BAM")
                 result['target_mean_depth'] = calculate_bam_mean_depth(target_bam)
@@ -279,7 +279,7 @@ def process_sample(
                 result['target_mean_depth'] = float('nan')
             
             # Process background BAM
-            background_bam = input_dir / "samtools_merge_background" / f"{sample}_background.bam"
+            background_bam = input_dir / "split_bam_by_txt" / f"{sample}_background.bam"
             if background_bam.exists():
                 update_progress(f"[cyan]Processing {sample} - background BAM")
                 result['background_mean_depth'] = calculate_bam_mean_depth(background_bam)

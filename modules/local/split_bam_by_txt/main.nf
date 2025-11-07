@@ -52,6 +52,6 @@ process SPLIT_BAM_BY_TXT {
     # Use samtools view -N to extract reads
     samtools view -@ ${task.cpus} -b -N target_reads.txt     -o ${prefix}_target.bam ${bam_file}
     samtools view -@ ${task.cpus} -b -N background_reads.txt -o ${prefix}_background.bam ${bam_file}
-    samtools view -@ ${task.cpus} -b -N classified_reads.txt -U ${prefix}_unclassified.bam ${bam_file}
+    samtools view -@ ${task.cpus} -b -N classified_reads.txt -U ${prefix}_unclassified.bam ${bam_file} > /dev/null
     """
 }
