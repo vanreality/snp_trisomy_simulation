@@ -17,11 +17,29 @@ process SPLIT_BAM_BY_TXT {
     export LC_ALL=C
 
     # Extract read names based on probability threshold
-    # Skip header (first line) and extract reads with prob > 0.5 for target, prob <= 0.5 for background
-    tail -n +2 ${txt_file} | awk -F '\\t' -v t="${threshold}" '
+    # Automatically detect column numbers for 'name' and 'prob_class_1' from header
+    awk -F '\\t' -v t="${threshold}" '
+      NR == 1 {
+        # Process header to find column indices
+        for (i = 1; i <= NF; i++) {
+          if (\$i == "name") name_col = i;
+          if (\$i == "prob_class_1") prob_col = i;
+        }
+        # Validate that required columns were found
+        if (name_col == 0) {
+          print "ERROR: Column '\''name'\'' not found in header" > "/dev/stderr";
+          exit 1;
+        }
+        if (prob_col == 0) {
+          print "ERROR: Column '\''prob_class_1'\'' not found in header" > "/dev/stderr";
+          exit 1;
+        }
+        next;
+      }
       {
-        name = \$7;
-        prob = \$12 + 0.0;
+        # Process data rows using detected column indices
+        name = \$name_col;
+        prob = \$prob_col + 0.0;
         if (prob > t) {
           if (!(name in seen_t)) { print name >> "target_reads.txt";     seen_t[name]=1 }
         } else {
@@ -29,7 +47,7 @@ process SPLIT_BAM_BY_TXT {
         }
         if (!(name in seen_all)) { print name >> "classified_reads.txt"; seen_all[name]=1 }
       }
-    '
+    ' ${txt_file}
     
     # Use samtools view -N to extract reads
     samtools view -@ ${task.cpus} -b -N target_reads.txt     -o ${prefix}_target.bam ${bam_file}
