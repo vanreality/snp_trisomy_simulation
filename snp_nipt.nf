@@ -139,7 +139,7 @@ workflow {
         }.groupTuple(by: 0)
             .map { groupKey, meta, txtFiles ->
                 def new_meta = meta.first()
-                def txtList = txtFiles.toList()
+                def txtList = txtFiles.unique { it.toString() } as List
                 return [new_meta, txtList]
             }
             .set { ch_samplesheet_groupby_txt }
@@ -164,7 +164,7 @@ workflow {
         }.groupTuple(by: 0)
             .map { groupKey, meta, bamFiles ->
                 def new_meta = meta.first()
-                def bamList = bamFiles.toList()
+                def bamList = bamFiles.unique { it.toString() } as List
                 return [new_meta, bamList]
             }
             .set { ch_samplesheet_bam_grouped }
