@@ -2,12 +2,12 @@ process MERGE_TXT {
     tag "$meta.id"
     
     input:
-    tuple val(meta), path(txt_files, stageAs: "input_?.txt"), path(bam_file)
+    tuple val(meta), path(txt_files, stageAs: "input_?.txt")
     path(merge_script)
     val(ncpgs)
     
     output:
-    tuple val(meta), path("merged_txt.txt"), path(bam_file), emit: merged_txt
+    tuple val(meta), path("merged_txt.txt"), emit: merged_txt
     
     script:
     """

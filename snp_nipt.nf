@@ -134,14 +134,13 @@ workflow {
         // Group by bam file and merge txt files
         ch_samplesheet.map {
             meta, txtFile, bamFile ->
-            def groupKey = bamFile.toString()
-            return [groupKey, meta, txtFile, bamFile]
+            def groupKey = meta.id.toString()
+            return [groupKey, meta, txtFile]
         }.groupTuple(by: 0)
-            .map { groupKey, meta, txtFiles, bamFiles ->
+            .map { groupKey, meta, txtFiles ->
                 def new_meta = meta.first()
                 def txtList = txtFiles.toList()
-                def bamFile = bamFiles.first()
-                return [new_meta, txtList, bamFile]
+                return [new_meta, txtList]
             }
             .set { ch_samplesheet_groupby_txt }
 
@@ -151,15 +150,19 @@ workflow {
             params.ncpgs
         )
         MERGE_TXT.out.merged_txt
+            .map { meta, merged_txtFile ->
+                def groupKey = meta.id.toString()
+                return [groupKey, meta, merged_txtFile]
+            }
             .set { ch_samplesheet_txt_merged }
 
         // Group by sample ,merge bam files and dedup bam files
-        ch_samplesheet_txt_merged.map {
+        ch_samplesheet.map {
             meta, txtFile, bamFile ->
             def groupKey = meta.id.toString()
-            return [groupKey, meta, txtFile, bamFile]
+            return [groupKey, meta, bamFile]
         }.groupTuple(by: 0)
-            .map { groupKey, meta, txtFiles, bamFiles ->
+            .map { groupKey, meta, bamFiles ->
                 def new_meta = meta.first()
                 def bamList = bamFiles.toList()
                 return [new_meta, bamList]
@@ -181,22 +184,13 @@ workflow {
             [[:], file(params.fasta_index)],
         )
         PICARD_MARKDUPLICATES.out.bam
-            .map { meta, bam ->
+            .map { meta, merged_bamFile ->
                 def groupKey = meta.id.toString()
-                return [groupKey, meta, bam]
+                return [groupKey, meta, merged_bamFile]
             }
             .set { ch_samplesheet_bam_dedup }
 
-        ch_samplesheet_txt_merged.map {
-            meta, txtFile, bamFile ->
-            def groupKey = meta.id.toString()
-            return [groupKey, meta, txtFile]
-        }.groupTuple(by: 0)
-            .map { groupKey, meta, txtFiles ->
-                def new_meta = meta.first()
-                def txtFile = txtFiles.first()
-                return [groupKey, new_meta, txtFile]
-            }
+        ch_samplesheet_txt_merged
             .join(ch_samplesheet_bam_dedup, by: 0)
             .map { key, meta_1, merged_txtFile, meta_2, merged_bamFile ->
                 return [meta_1, merged_txtFile, merged_bamFile]
