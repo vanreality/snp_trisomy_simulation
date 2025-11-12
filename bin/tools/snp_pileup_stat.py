@@ -411,8 +411,7 @@ def main(input_dir: Path, output_prefix: str, ncpus: int, bam_depth_stat: bool) 
     
     # Validate input directory structure
     required_dirs = [
-        "samtools_merge_target",
-        "samtools_merge_background",
+        "split_bam_by_txt",
         "merge_pileup_hard_filter"
     ]
     
