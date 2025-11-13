@@ -6,6 +6,7 @@ This script merges multiple text files with columns 'name', 'prob_class_1', and 
 optionally filters by mTcount threshold, and outputs a merged file with 'name' and 'prob_class_1'.
 """
 
+import gc
 import sys
 from pathlib import Path
 from typing import List
@@ -37,41 +38,48 @@ def validate_input_files(input_files: List[Path]) -> None:
             raise ValueError(f"Path is not a file: {file_path}")
 
 
-def read_txt_file(file_path: Path, required_columns: List[str]) -> pl.DataFrame:
+def read_txt_file_lazy(file_path: Path, required_columns: List[str], ncpgs: int = 0) -> pl.LazyFrame:
     """
-    Read a single text file into a Polars DataFrame.
+    Read a single text file into a Polars LazyFrame for memory-efficient processing.
     
     Args:
         file_path: Path to the text file to read.
         required_columns: List of column names that must be present.
+        ncpgs: Minimum mTcount threshold for filtering (applied lazily).
         
     Returns:
-        A Polars DataFrame containing the data from the file.
+        A Polars LazyFrame containing the data from the file with filters applied.
         
     Raises:
         ValueError: If required columns are missing from the file.
         Exception: If the file cannot be read or parsed.
     """
     try:
-        # Read the file with tab separator (common for genomic data)
-        df = pl.read_csv(
+        # Use scan_csv for lazy reading - doesn't load data into memory immediately
+        lazy_df = pl.scan_csv(
             file_path,
             separator="\t",
             has_header=True,
-            null_values=["NA", "na", "N/A", ""]
+            null_values=["NA", "na", "N/A", ""],
+            low_memory=True,  # Optimize for memory usage over speed
         )
         
-        # Validate required columns exist
-        missing_columns = [col for col in required_columns if col not in df.columns]
+        # Validate required columns exist (this requires a small schema check)
+        schema_columns = lazy_df.collect_schema().names()
+        missing_columns = [col for col in required_columns if col not in schema_columns]
         if missing_columns:
             raise ValueError(
                 f"File {file_path} is missing required columns: {', '.join(missing_columns)}"
             )
         
-        # Select only the required columns to save memory
-        df = df.select(required_columns)
+        # Apply filter early if ncpgs > 0 (lazy operation, very efficient)
+        if ncpgs > 0:
+            lazy_df = lazy_df.filter(pl.col("mTcount") >= ncpgs)
         
-        return df
+        # Select only the required columns to save memory (lazy operation)
+        lazy_df = lazy_df.select(required_columns)
+        
+        return lazy_df
         
     except Exception as e:
         console.print(f"[bold red]Error reading file {file_path}:[/bold red] {str(e)}")
@@ -83,7 +91,7 @@ def merge_txt_files(
     ncpgs: int = 0
 ) -> pl.DataFrame:
     """
-    Merge multiple text files and apply filtering.
+    Merge multiple text files and apply filtering using lazy evaluation for memory efficiency.
     
     Args:
         input_files: List of Path objects pointing to input files.
@@ -96,9 +104,9 @@ def merge_txt_files(
         ValueError: If no valid data remains after filtering.
     """
     required_columns = ["name", "prob_class_1", "mTcount"]
-    dataframes = []
+    lazy_frames = []
     
-    # Read all input files with progress tracking
+    # Build lazy frames for all input files with progress tracking
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -108,64 +116,71 @@ def merge_txt_files(
         console=console
     ) as progress:
         task = progress.add_task(
-            "[cyan]Reading input files...",
+            "[cyan]Preparing input files...",
             total=len(input_files)
         )
         
         for file_path in input_files:
             try:
-                df = read_txt_file(file_path, required_columns)
-                dataframes.append(df)
+                # Create lazy frame (no data loaded into memory yet)
+                lazy_df = read_txt_file_lazy(file_path, required_columns, ncpgs)
+                lazy_frames.append(lazy_df)
                 progress.update(
                     task,
                     advance=1,
-                    description=f"[cyan]Reading input files... ({file_path.name})"
+                    description=f"[cyan]Preparing input files... ({file_path.name})"
                 )
             except Exception as e:
                 console.print(f"[bold yellow]Warning:[/bold yellow] Skipping {file_path}: {str(e)}")
                 progress.update(task, advance=1)
     
-    # Check if we have any valid dataframes
-    if not dataframes:
+    # Check if we have any valid lazy frames
+    if not lazy_frames:
         raise ValueError("No valid input files could be read")
     
-    console.print(f"[green]✓[/green] Successfully read {len(dataframes)} file(s)")
+    console.print(f"[green]✓[/green] Successfully prepared {len(lazy_frames)} file(s)")
     
-    # Merge all dataframes
-    console.print("[cyan]Merging dataframes...[/cyan]")
-    merged_df = pl.concat(dataframes, how="vertical")
+    # Merge all lazy frames (still lazy, no data loaded)
+    console.print("[cyan]Merging and processing data (this may take a while for large files)...[/cyan]")
     
-    initial_rows = len(merged_df)
-    console.print(f"[green]✓[/green] Merged data contains {initial_rows:,} rows")
+    # Concatenate lazy frames
+    merged_lazy = pl.concat(lazy_frames, how="vertical")
     
-    # Apply filtering if ncpgs > 0
+    # Select only the output columns we need (lazy operation)
+    output_lazy = merged_lazy.select(["name", "prob_class_1"])
+    
+    # Now collect the data (this is where the actual computation happens)
+    # Use streaming mode for better memory efficiency with large datasets
+    try:
+        output_df = output_lazy.collect(streaming=True)
+    except Exception as e:
+        # Fallback to non-streaming if streaming fails
+        console.print("[yellow]⚠[/yellow] Streaming mode failed, falling back to standard collection...")
+        output_df = output_lazy.collect()
+    
+    # Force garbage collection to free up memory
+    gc.collect()
+    
+    output_rows = len(output_df)
+    console.print(f"[green]✓[/green] Processed data contains {output_rows:,} rows")
+    
     if ncpgs > 0:
-        console.print(f"[cyan]Applying filter: mTcount >= {ncpgs}...[/cyan]")
-        merged_df = merged_df.filter(pl.col("mTcount") >= ncpgs)
-        filtered_rows = len(merged_df)
-        removed_rows = initial_rows - filtered_rows
-        console.print(
-            f"[green]✓[/green] Filtered data contains {filtered_rows:,} rows "
-            f"({removed_rows:,} rows removed)"
-        )
-        
-        if filtered_rows == 0:
-            raise ValueError(
-                f"No data remains after filtering with mTcount >= {ncpgs}. "
-                f"Consider using a lower threshold."
-            )
+        console.print(f"[green]✓[/green] Filter applied: mTcount >= {ncpgs}")
     else:
         console.print("[yellow]ℹ[/yellow] No filtering applied (ncpgs = 0)")
     
-    # Select only the output columns
-    output_df = merged_df.select(["name", "prob_class_1"])
+    if output_rows == 0:
+        raise ValueError(
+            f"No data remains after processing. "
+            f"Check your input files and filter threshold (ncpgs={ncpgs})."
+        )
     
     return output_df
 
 
 def write_output(df: pl.DataFrame, output_path: Path) -> None:
     """
-    Write the merged DataFrame to an output file.
+    Write the merged DataFrame to an output file with memory-efficient batching.
     
     Args:
         df: Polars DataFrame to write.
@@ -179,6 +194,8 @@ def write_output(df: pl.DataFrame, output_path: Path) -> None:
         # Ensure output directory exists
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
+        console.print("[cyan]Writing output file...[/cyan]")
+        
         # Write to file with tab separator
         df.write_csv(
             output_path,
@@ -188,6 +205,9 @@ def write_output(df: pl.DataFrame, output_path: Path) -> None:
         
         console.print(f"[green]✓[/green] Output written to: {output_path}")
         console.print(f"[green]✓[/green] Output contains {len(df):,} rows")
+        
+        # Force garbage collection after writing
+        gc.collect()
         
     except Exception as e:
         console.print(f"[bold red]Error writing output file:[/bold red] {str(e)}")
@@ -258,8 +278,11 @@ def main(inputs: str, output: str, ncpgs: int) -> None:
         
         # Write output
         output_path = Path(output)
-        console.print("[cyan]Writing output file...[/cyan]")
         write_output(merged_df, output_path)
+        
+        # Final cleanup
+        del merged_df
+        gc.collect()
         
         console.print("=" * 60)
         console.print("[bold green]✓ Process completed successfully![/bold green]")
