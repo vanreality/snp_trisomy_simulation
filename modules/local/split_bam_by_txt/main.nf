@@ -9,6 +9,9 @@ process SPLIT_BAM_BY_TXT {
     tuple val(meta), path("*_target.bam"), emit: target
     tuple val(meta), path("*_background.bam"), emit: background
     tuple val(meta), path("*_unclassified.bam"), emit: unclassified
+    tuple val(meta), path("*_target.bam.bai"), emit: target_bai
+    tuple val(meta), path("*_background.bam.bai"), emit: background_bai
+    tuple val(meta), path("*_unclassified.bam.bai"), emit: unclassified_bai
     
     script:
     def prefix = task.ext.prefix ?: "${meta.id}"
@@ -53,5 +56,10 @@ process SPLIT_BAM_BY_TXT {
     samtools view -@ ${task.cpus} -b -N target_reads.txt     -o ${prefix}_target.bam ${bam_file}
     samtools view -@ ${task.cpus} -b -N background_reads.txt -o ${prefix}_background.bam ${bam_file}
     samtools view -@ ${task.cpus} -b -N classified_reads.txt -U ${prefix}_unclassified.bam ${bam_file} > /dev/null
+
+    # Index the output BAM files
+    samtools index ${prefix}_target.bam
+    samtools index ${prefix}_background.bam
+    samtools index ${prefix}_unclassified.bam
     """
 }

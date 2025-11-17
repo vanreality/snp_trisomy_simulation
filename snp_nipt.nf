@@ -53,6 +53,15 @@ workflow {
                 return [meta, txtFile, bamFile]
             }
             .set { ch_samplesheet }
+    } else if (params.input_bam_samplesheet) {
+        Channel
+            .fromPath(params.input_bam_samplesheet)
+            .splitCsv(header: true)
+            .map { row -> 
+                def meta = [id: row.sample]
+                return [meta, file(row.bam)]
+            }
+            .set { ch_samplesheet }
     } else if (params.input_parquet) {
         // Run split_parquet_by_sample process to split input parquet file by sample
         SPLIT_PARQUET_BY_SAMPLE(
@@ -108,22 +117,41 @@ workflow {
         VCF_TO_PILEUP.out.pileup
             .set { ch_pileup_samplesheet }
     } else if (params.input_bam_samplesheet) {
-        Channel
-            .fromPath(params.input_bam_samplesheet)
-            .splitCsv(header: true)
-            .map { row -> 
-                tuple(row.sample, file(row.bam))
+        ch_samplesheet.map {
+            meta, bamFile ->
+            def groupKey = meta.id.toString()
+            return [groupKey, meta, bamFile]
+        }.groupTuple(by: 0)
+            .map { groupKey, meta, bamFiles ->
+                def new_meta = meta.first()
+                def bamList = bamFiles.unique { it.toString() } as List
+                return [new_meta, bamList]
             }
-            .groupTuple(by: 0)
-            .map { sample, bamFiles ->
-                def bamList = bamFiles.toList()
-                def meta = [id: sample]
-                return tuple(meta, bamList)
+            .set { ch_samplesheet_bam_grouped }
+        
+        SAMTOOLS_MERGE(
+            ch_samplesheet_bam_grouped,
+            [[:], file(params.fasta)],
+            [[:], file(params.fasta_index)],
+            [[:], []]
+        )
+        SAMTOOLS_MERGE.out.bam
+            .set { ch_samplesheet_bam_merged }
+
+        PICARD_MARKDUPLICATES(
+            ch_samplesheet_bam_merged,
+            [[:], file(params.fasta)],
+            [[:], file(params.fasta_index)],
+        )
+        PICARD_MARKDUPLICATES.out.bam
+            .map { meta, merged_bamFile ->
+                def groupKey = meta.id.toString()
+                return [groupKey, meta, merged_bamFile]
             }
-            .set { ch_bam_samplesheet }
+            .set { ch_samplesheet_bam_dedup }
 
         BAM_TO_PILEUP_HARD_FILTER_TARGET(
-            ch_bam_samplesheet,
+            ch_samplesheet_bam_dedup,
             file(params.known_sites_tsv),
             file("${workflow.projectDir}/bin/bam_to_pileup_hard_filter.py"),
             file("${workflow.projectDir}/bin/merge_pileups.py")
@@ -300,7 +328,7 @@ workflow {
             ch_pileup_samplesheet, 
             file("${workflow.projectDir}/bin/filter_pileup.py")
         )
-    } else {
+    } else if (params.input_parquet) {
         EXTRACT_SNP_FROM_PARQUET(
             ch_parquet_samplesheet,
             file(params.fasta),
@@ -315,9 +343,9 @@ workflow {
     }
 
 
+    // 3. LR calculation
+    // ====================================
     if (params.run_lr_calculator) {
-        // 3. LR calculation
-        // ====================================
         CALCULATE_LR(
             ch_pileup_samplesheet,
             params.lr_mode,
@@ -333,8 +361,6 @@ workflow {
             file("${workflow.projectDir}/bin/merge_lr_output.py")
         )
     }
-
-
 }
 
 
