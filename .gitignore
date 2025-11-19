@@ -3,7 +3,12 @@
 .ipynb_checkpoints/
 .nextflow/
 work/
+containers/
 images/
 data/
 bin/__pycache__/
 bin/tools/__pycache__/
+.nextflow*
+*.ipynb
+run_cmd.txt
+plot/
