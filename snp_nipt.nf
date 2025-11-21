@@ -13,6 +13,7 @@ include { FILTER_PILEUP } from './modules/local/filter_pileup/main.nf'
 include { SAMTOOLS_MERGE } from './modules/nf-core/samtools/merge/main.nf'
 include { MERGE_TXT } from './modules/local/merge_txt/main.nf'
 include { PICARD_MARKDUPLICATES } from './modules/nf-core/picard/markduplicates/main.nf'
+include { EXTRACT_GROUND_TRUTH } from './modules/local/extract_ground_truth/main.nf'
 
 workflow {
     // 1. Input samplesheet(txt, bam, parquet) processing
@@ -359,6 +360,32 @@ workflow {
         MERGE_LR_OUTPUT(
             CALCULATE_LR.out.lr_results.collect(),
             file("${workflow.projectDir}/bin/merge_lr_output.py")
+        )
+    }
+
+    // 4. Extract ground truth
+    // ====================================
+    if (params.input_ground_truth_samplesheet) {
+        Channel
+            .fromPath(params.input_ground_truth_samplesheet)
+            .splitCsv(header: true)
+            .map { row -> 
+                return [row.sample, file(row.txt), file(row.target_bam), file(row.background_bam), file(row.filtered_pileup)]
+            }
+            .groupTuple(by: 0)
+            .map { sample, txtFiles, target_bamFiles, background_bamFiles, filtered_pileups ->
+                def meta = [id: sample.toString()]
+                def txtList = txtFiles.toList()
+                def target_bamFile = target_bamFiles.first()
+                def background_bamFile = background_bamFiles.first()
+                def filtered_pileupFile = filtered_pileups.first()
+                return tuple(meta, txtList, target_bamFile, background_bamFile, filtered_pileupFile)
+            }
+            .set { ch_ground_truth_samplesheet }
+        
+        EXTRACT_GROUND_TRUTH(
+            ch_ground_truth_samplesheet,
+            file("${workflow.projectDir}/bin/extract_ground_truth.py")
         )
     }
 }

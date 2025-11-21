@@ -102,6 +102,7 @@ class PileupCounts:
 def load_probability_table(prob_file: Path, progress: Progress, task_id: TaskID) -> Dict[str, float]:
     """
     Load read probability table and create read name to fetal probability mapping.
+    Uses chunked reading for memory efficiency with large files.
     
     Args:
         prob_file (Path): Path to the probability TSV file
@@ -121,25 +122,51 @@ def load_probability_table(prob_file: Path, progress: Progress, task_id: TaskID)
     progress.update(task_id, description="Loading probability table...")
     
     try:
-        # Read TSV with header, only loading required columns for memory efficiency
-        prob_data = pd.read_csv(prob_file, sep='\t', usecols=['name', 'prob_class_1'])
+        prob_map = {}
+        chunk_size = 100000  # Process 100K rows at a time
         
-        # Validate required columns were successfully loaded
-        if 'name' not in prob_data.columns:
-            raise ValueError("Required column 'name' not found in probability file")
-        if 'prob_class_1' not in prob_data.columns:
-            raise ValueError("Required column 'prob_class_1' not found in probability file")
+        # Define dtype to use less memory (float32 instead of float64)
+        dtype_dict = {'name': str, 'prob_class_1': 'float32'}
         
-        # Build probability mapping, using first occurrence for duplicates
-        # Use drop_duplicates for efficiency with large files
-        prob_data_dedup = prob_data.drop_duplicates(subset=['name'], keep='first').copy()
+        # Read file in chunks to avoid memory issues
+        chunk_iter = pd.read_csv(
+            prob_file, 
+            sep='\t', 
+            usecols=['name', 'prob_class_1'],
+            dtype=dtype_dict,
+            chunksize=chunk_size,
+            engine='c'  # Use faster C engine
+        )
         
-        # Clamp probabilities to [0, 1] and create mapping
-        prob_data_dedup['prob_class_1'] = prob_data_dedup['prob_class_1'].clip(0.0, 1.0)
-        prob_map = dict(zip(prob_data_dedup['name'].astype(str), prob_data_dedup['prob_class_1']))
+        total_rows_processed = 0
+        for chunk in chunk_iter:
+            # Validate required columns (only need to check first chunk)
+            if total_rows_processed == 0:
+                if 'name' not in chunk.columns:
+                    raise ValueError("Required column 'name' not found in probability file")
+                if 'prob_class_1' not in chunk.columns:
+                    raise ValueError("Required column 'prob_class_1' not found in probability file")
+            
+            # Drop duplicates within chunk (keep first occurrence)
+            chunk_dedup = chunk.drop_duplicates(subset=['name'], keep='first')
+            
+            # Clip probabilities to [0, 1]
+            chunk_dedup['prob_class_1'] = chunk_dedup['prob_class_1'].clip(0.0, 1.0)
+            
+            # Update dictionary (only add if not already present - first occurrence wins)
+            for name, prob in zip(chunk_dedup['name'], chunk_dedup['prob_class_1']):
+                if name not in prob_map:
+                    prob_map[name] = float(prob)
+            
+            total_rows_processed += len(chunk)
+            
+            # Update progress periodically
+            if total_rows_processed % (chunk_size * 10) == 0:
+                progress.update(task_id, advance=10)
         
-        progress.update(task_id, advance=100)
-        console.print(f"[green]✓[/green] Loaded probabilities for {len(prob_map):,} reads")
+        progress.update(task_id, completed=100)
+        console.print(f"[green]✓[/green] Loaded probabilities for {len(prob_map):,} unique reads")
+        console.print(f"[blue]Processed {total_rows_processed:,} total rows[/blue]")
         
         return prob_map
         
@@ -386,29 +413,10 @@ def process_pileup_site(bam_file: pysam.AlignmentFile, site: SNPSite,
                 # Apply bisulfite-specific flag filtering based on SNP type
                 # Extract the core SAM flag (excluding paired-end flags)
                 read_flag = read.flag
-                
-                # Determine effective flag for bisulfite filtering
-                # We care about the strand orientation
-                if read.is_reverse:
-                    # Reverse strand alignment
-                    if read.is_read1:
-                        effective_flag = 83  # First in pair, reverse strand
-                    elif read.is_read2:
-                        effective_flag = 163  # Second in pair, reverse strand (but forward original)
-                    else:
-                        effective_flag = 16  # Single-end or unmapped pair, reverse strand
-                else:
-                    # Forward strand alignment
-                    if read.is_read1:
-                        effective_flag = 99  # First in pair, forward strand
-                    elif read.is_read2:
-                        effective_flag = 147  # Second in pair, forward strand (but reverse original)
-                    else:
-                        effective_flag = 0  # Single-end or unmapped pair, forward strand
-                
+
                 # Apply flag filtering if this SNP type requires it
                 if allowed_flags is not None:
-                    if effective_flag not in allowed_flags:
+                    if read_flag not in allowed_flags:
                         continue  # Skip reads with disallowed flags for this SNP type
                 
                 # Skip deletions, reference skips, and insertions

@@ -127,8 +127,6 @@ class FFEstimator:
         self.mode = mode
         console.print(f"[green]FFEstimator initialized in {mode} mode[/green]")
 
-        self.allelic_bias = 0.47747748/(1-0.47747748)
-    
     def estimate(
         self,
         background_chr_df: pd.DataFrame, 
