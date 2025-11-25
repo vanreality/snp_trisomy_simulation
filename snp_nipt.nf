@@ -145,10 +145,6 @@ workflow {
             [[:], file(params.fasta_index)],
         )
         PICARD_MARKDUPLICATES.out.bam
-            .map { meta, merged_bamFile ->
-                def groupKey = meta.id.toString()
-                return [groupKey, meta, merged_bamFile]
-            }
             .set { ch_samplesheet_bam_dedup }
 
         BAM_TO_PILEUP_HARD_FILTER_TARGET(

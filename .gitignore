@@ -12,3 +12,4 @@ bin/tools/__pycache__/
 *.ipynb
 run_cmd.txt
 plot/
+notebooks/
