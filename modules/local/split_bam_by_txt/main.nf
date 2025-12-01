@@ -58,8 +58,8 @@ process SPLIT_BAM_BY_TXT {
     samtools view -@ ${task.cpus} -b -N classified_reads.txt -U ${prefix}_unclassified.bam ${bam_file} > /dev/null
 
     # Index the output BAM files
-    samtools index ${prefix}_target.bam
-    samtools index ${prefix}_background.bam
-    samtools index ${prefix}_unclassified.bam
+    samtools index -@ ${task.cpus} ${prefix}_target.bam
+    samtools index -@ ${task.cpus} ${prefix}_background.bam
+    samtools index -@ ${task.cpus} ${prefix}_unclassified.bam
     """
 }
