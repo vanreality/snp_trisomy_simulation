@@ -21,6 +21,7 @@ process SPLIT_BAM_BY_TXT {
 
     # Extract read names based on probability threshold
     # Automatically detect column numbers for 'name' and 'prob_class_1' from header
+    # Memory-efficient: stream processing without storing all names in memory
     awk -F '\\t' -v t="${threshold}" '
       NR == 1 {
         # Process header to find column indices
@@ -40,17 +41,23 @@ process SPLIT_BAM_BY_TXT {
         next;
       }
       {
-        # Process data rows using detected column indices
+        # Process data rows using detected column indices - stream output
         name = \$name_col;
         prob = \$prob_col + 0.0;
         if (prob > t) {
-          if (!(name in seen_t)) { print name >> "target_reads.txt";     seen_t[name]=1 }
+          print name >> "target_reads.tmp";
         } else {
-          if (!(name in seen_b)) { print name >> "background_reads.txt"; seen_b[name]=1 }
+          print name >> "background_reads.tmp";
         }
-        if (!(name in seen_all)) { print name >> "classified_reads.txt"; seen_all[name]=1 }
+        print name >> "classified_reads.tmp";
       }
     ' ${txt_file}
+    
+    # Remove duplicates using sort (memory-efficient, uses disk for large files)
+    sort -u -o target_reads.txt target_reads.tmp
+    sort -u -o background_reads.txt background_reads.tmp
+    sort -u -o classified_reads.txt classified_reads.tmp
+    rm -f target_reads.tmp background_reads.tmp classified_reads.tmp
     
     # Use samtools view -N to extract reads
     samtools view -@ ${task.cpus} -b -N target_reads.txt     -o ${prefix}_target.bam ${bam_file}
