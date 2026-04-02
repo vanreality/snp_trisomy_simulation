@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import click
-import pandas as pd
+import polars as pl
 import pysam
 from rich.console import Console
 from rich.progress import Progress, TaskID
@@ -103,70 +103,41 @@ class ReadRecord:
 def load_probability_table(prob_file: Path, progress: Progress, task_id: TaskID) -> Dict[str, float]:
     """
     Load read probability table and create read name to fetal probability mapping.
-    Uses chunked reading for memory efficiency with large files.
-    
+
+    Uses a Polars lazy scan so only the two needed columns are materialised,
+    deduplication and clipping happen in a single fused pipeline.
+
     Args:
         prob_file (Path): Path to the probability TSV file
         progress (Progress): Rich progress bar instance
         task_id (TaskID): Task ID for progress tracking
-        
+
     Returns:
         Dict[str, float]: Mapping from read name to fetal probability [0,1]
     """
     if not prob_file.exists():
         raise FileNotFoundError(f"Probability file not found: {prob_file}")
-    
+
     progress.update(task_id, description="Loading probability table...")
-    
+
     try:
-        prob_map = {}
-        chunk_size = 100000  # Process 100K rows at a time
-        
-        # Define dtype to use less memory (float32 instead of float64)
-        dtype_dict = {'name': str, 'prob_class_1': 'float32'}
-        
-        # Read file in chunks to avoid memory issues
-        chunk_iter = pd.read_csv(
-            prob_file, 
-            sep='\t', 
-            usecols=['name', 'prob_class_1'],
-            dtype=dtype_dict,
-            chunksize=chunk_size,
-            engine='c'  # Use faster C engine
+        df = (
+            pl.scan_csv(prob_file, separator="\t")
+            .select(["name", "prob_class_1"])
+            .unique(subset=["name"], keep="first")
+            .with_columns(pl.col("prob_class_1").clip(0.0, 1.0))
+            .collect(streaming=True)
         )
-        
-        total_rows_processed = 0
-        for chunk in chunk_iter:
-            # Validate required columns (only need to check first chunk)
-            if total_rows_processed == 0:
-                if 'name' not in chunk.columns:
-                    raise ValueError("Required column 'name' not found in probability file")
-                if 'prob_class_1' not in chunk.columns:
-                    raise ValueError("Required column 'prob_class_1' not found in probability file")
-            
-            # Drop duplicates within chunk (keep first occurrence)
-            chunk_dedup = chunk.drop_duplicates(subset=['name'], keep='first')
-            
-            # Clip probabilities to [0, 1]
-            chunk_dedup['prob_class_1'] = chunk_dedup['prob_class_1'].clip(0.0, 1.0)
-            
-            # Update dictionary (only add if not already present - first occurrence wins)
-            for name, prob in zip(chunk_dedup['name'], chunk_dedup['prob_class_1']):
-                if name not in prob_map:
-                    prob_map[name] = float(prob)
-            
-            total_rows_processed += len(chunk)
-            
-            # Update progress periodically
-            if total_rows_processed % (chunk_size * 10) == 0:
-                progress.update(task_id, advance=10)
-        
+
         progress.update(task_id, completed=100)
+
+        prob_map = dict(
+            zip(df["name"].to_list(), df["prob_class_1"].to_list())
+        )
         console.print(f"[green]✓[/green] Loaded probabilities for {len(prob_map):,} unique reads")
-        console.print(f"[blue]Processed {total_rows_processed:,} total rows[/blue]")
-        
+
         return prob_map
-        
+
     except Exception as e:
         console.print(f"[red]Error loading probability file: {e}[/red]")
         raise
@@ -175,86 +146,72 @@ def load_probability_table(prob_file: Path, progress: Progress, task_id: TaskID)
 def parse_filtered_pileup(pileup_file: Path, progress: Progress, task_id: TaskID) -> List[SNPSite]:
     """
     Parse filtered pileup file to extract SNP sites with ground truth information.
-    
+
     The filtered pileup contains SNPs where maternal is homozygous and fetal is heterozygous.
     Based on raw_vaf, we can determine which allele is fetal.
-    
+
     Args:
         pileup_file (Path): Path to filtered pileup TSV file
         progress (Progress): Rich progress bar instance
         task_id (TaskID): Task ID for progress tracking
-        
+
     Returns:
         List[SNPSite]: List of SNP sites with ground truth labels
     """
     if not pileup_file.exists():
         raise FileNotFoundError(f"Filtered pileup file not found: {pileup_file}")
-    
+
     progress.update(task_id, description="Parsing filtered pileup...")
-    
+
     try:
-        # Read filtered pileup file
-        pileup_data = pd.read_csv(pileup_file, sep='\t')
-        
-        # Validate required columns
-        required_cols = ['chr', 'pos', 'ref', 'alt', 'af', 'raw_vaf', 'target_vaf', 'background_vaf']
-        for col in required_cols:
-            if col not in pileup_data.columns:
-                raise ValueError(f"Required column '{col}' not found in filtered pileup file")
-        
-        progress.update(task_id, advance=30)
-        
-        # Convert bases to uppercase
-        pileup_data['ref'] = pileup_data['ref'].str.upper()
-        pileup_data['alt'] = pileup_data['alt'].str.upper()
-        
-        # Make a copy to avoid SettingWithCopyWarning
-        pileup_data = pileup_data.copy()
-        
-        # Determine fetal allele based on raw_vaf
-        # raw_vaf in (0, 0.2): ALT is fetal (maternal is REF/REF, fetal is REF/ALT)
-        # raw_vaf in (0.8, 1.0): REF is fetal (maternal is ALT/ALT, fetal is ALT/REF)
-        def determine_fetal_allele(row):
-            if 0 < row['raw_vaf'] < 0.2:
-                return 'ALT'
-            elif 0.8 < row['raw_vaf'] < 1.0:
-                return 'REF'
-            else:
-                return None  # Outside valid ranges
-        
-        pileup_data['fetal_allele'] = pileup_data.apply(determine_fetal_allele, axis=1)
-        
-        # Filter to only valid sites
-        pileup_data = pileup_data[pileup_data['fetal_allele'].notna()].copy()
-        
-        progress.update(task_id, advance=40)
-        
-        # Convert to list of SNPSite objects
-        sites = [
-            SNPSite(
-                chr=row['chr'],
-                pos=int(row['pos']),
-                ref=row['ref'],
-                alt=row['alt'],
-                af=float(row['af']),
-                raw_vaf=float(row['raw_vaf']),
-                target_vaf=float(row['target_vaf']),
-                background_vaf=float(row['background_vaf']),
-                fetal_allele=row['fetal_allele']
+        df = pl.read_csv(pileup_file, separator="\t")
+
+        required_cols = ["chr", "pos", "ref", "alt", "af", "raw_vaf", "target_vaf", "background_vaf"]
+        missing = [c for c in required_cols if c not in df.columns]
+        if missing:
+            raise ValueError(
+                f"Required column(s) not found in filtered pileup file: {', '.join(missing)}"
             )
-            for _, row in pileup_data.iterrows()
-        ]
-        
+
         progress.update(task_id, advance=30)
-        
-        alt_fetal = sum(1 for s in sites if s.fetal_allele == 'ALT')
-        ref_fetal = sum(1 for s in sites if s.fetal_allele == 'REF')
+
+        vaf = pl.col("raw_vaf")
+        df = (
+            df.with_columns(
+                pl.col("ref").str.to_uppercase(),
+                pl.col("alt").str.to_uppercase(),
+                pl.when((vaf > 0) & (vaf < 0.2))
+                .then(pl.lit("ALT"))
+                .when((vaf > 0.8) & (vaf < 1.0))
+                .then(pl.lit("REF"))
+                .otherwise(pl.lit(None))
+                .alias("fetal_allele"),
+            )
+            .filter(pl.col("fetal_allele").is_not_null())
+        )
+
+        progress.update(task_id, advance=40)
+
+        site_cols = required_cols + ["fetal_allele"]
+        sites = [
+            SNPSite(**row)
+            for row in df.select(site_cols).iter_rows(named=True)
+        ]
+
+        progress.update(task_id, advance=30)
+
+        allele_counts = df.group_by("fetal_allele").len()
+        alt_series = allele_counts.filter(pl.col("fetal_allele") == "ALT")["len"]
+        ref_series = allele_counts.filter(pl.col("fetal_allele") == "REF")["len"]
+        alt_fetal = alt_series[0] if len(alt_series) > 0 else 0
+        ref_fetal = ref_series[0] if len(ref_series) > 0 else 0
+
         console.print(f"[green]✓[/green] Parsed {len(sites):,} SNP sites")
         console.print(f"  • {alt_fetal:,} sites with ALT as fetal allele (low VAF)")
         console.print(f"  • {ref_fetal:,} sites with REF as fetal allele (high VAF)")
-        
+
         return sites
-        
+
     except Exception as e:
         console.print(f"[red]Error parsing filtered pileup file: {e}[/red]")
         raise
@@ -658,82 +615,59 @@ def filter_probability_map(prob_file: Path, needed_reads: set,
                            progress: Progress, task_id: TaskID) -> Dict[str, float]:
     """
     Filter probability table to only include reads that are actually needed.
-    Uses chunked reading for memory efficiency.
-    
+
+    Uses a Polars lazy scan with an ``is_in`` predicate so only matching rows
+    are ever materialised in memory.
+
     Args:
         prob_file (Path): Path to the probability TSV file
         needed_reads (set): Set of read names that are actually needed
         progress (Progress): Rich progress bar instance
         task_id (TaskID): Task ID for progress tracking
-        
+
     Returns:
         Dict[str, float]: Filtered mapping from read name to fetal probability
     """
     progress.update(task_id, description="Filtering probability table...")
-    
+
     try:
-        prob_map = {}
-        chunk_size = 100000
-        
-        # Define dtype to use less memory
-        dtype_dict = {'name': str, 'prob_class_1': 'float32'}
-        
-        # Read file in chunks
-        chunk_iter = pd.read_csv(
-            prob_file, 
-            sep='\t', 
-            usecols=['name', 'prob_class_1'],
-            dtype=dtype_dict,
-            chunksize=chunk_size,
-            engine='c'
-        )
-        
-        total_rows_processed = 0
-        total_matches = 0
-        
-        # Debug: sample some needed reads
         sample_needed = list(needed_reads)[:5] if needed_reads else []
         console.print(f"[blue]Sample needed read names: {sample_needed}[/blue]")
-        
-        for chunk in chunk_iter:
-            # Debug first chunk
-            if total_rows_processed == 0:
-                sample_chunk = chunk['name'].head(5).tolist()
-                console.print(f"[blue]Sample read names from prob file: {sample_chunk}[/blue]")
-            
-            # Filter to only needed reads
-            chunk_filtered = chunk[chunk['name'].isin(needed_reads)]
-            matches_in_chunk = len(chunk_filtered)
-            total_matches += matches_in_chunk
-            
-            # Clip probabilities to [0, 1]
-            if len(chunk_filtered) > 0:
-                chunk_filtered = chunk_filtered.copy()
-                chunk_filtered['prob_class_1'] = chunk_filtered['prob_class_1'].clip(0.0, 1.0)
-                
-                # Update dictionary (first occurrence wins)
-                for name, prob in zip(chunk_filtered['name'], chunk_filtered['prob_class_1']):
-                    if name not in prob_map:
-                        prob_map[name] = float(prob)
-            
-            total_rows_processed += len(chunk)
-            
-            # Update progress periodically
-            if total_rows_processed % (chunk_size * 10) == 0:
-                progress.update(task_id, advance=5)
-        
+
+        needed_series = pl.Series("name", list(needed_reads))
+
+        df = (
+            pl.scan_csv(prob_file, separator="\t")
+            .select(["name", "prob_class_1"])
+            .filter(pl.col("name").is_in(needed_series))
+            .unique(subset=["name"], keep="first")
+            .with_columns(pl.col("prob_class_1").clip(0.0, 1.0))
+            .collect(streaming=True)
+        )
+
+        if df.height > 0:
+            sample_names = df["name"].head(5).to_list()
+            console.print(f"[blue]Sample matched read names: {sample_names}[/blue]")
+
+        prob_map = dict(
+            zip(df["name"].to_list(), df["prob_class_1"].to_list())
+        )
+
         progress.update(task_id, completed=100)
-        console.print(f"[green]✓[/green] Filtered to {len(prob_map):,} needed read probabilities (from {total_rows_processed:,} total rows)")
-        console.print(f"[blue]Total matches found during filtering: {total_matches:,}[/blue]")
-        
-        # Warn if many needed reads are missing
+        console.print(
+            f"[green]✓[/green] Filtered to {len(prob_map):,} needed read probabilities"
+        )
+
         missing_reads = len(needed_reads) - len(prob_map)
         if missing_reads > 0:
             match_rate = (len(prob_map) / len(needed_reads) * 100) if needed_reads else 0
-            console.print(f"[yellow]⚠[/yellow] {missing_reads:,} reads not found in probability file (match rate: {match_rate:.2f}%)")
-        
+            console.print(
+                f"[yellow]⚠[/yellow] {missing_reads:,} reads not found in probability file "
+                f"(match rate: {match_rate:.2f}%)"
+            )
+
         return prob_map
-        
+
     except Exception as e:
         console.print(f"[red]Error filtering probability file: {e}[/red]")
         raise
@@ -848,67 +782,63 @@ def save_ground_truth(records: List[ReadRecord], output_prefix: str,
                      progress: Progress, task_id: TaskID) -> Path:
     """
     Save ground truth read records to compressed TSV file.
-    
+
+    Builds a Polars DataFrame from the record list, sorts with a vectorised
+    chromosome-aware key, and writes gzipped TSV in a single pass.
+
     Args:
         records (List[ReadRecord]): Read records
         output_prefix (str): Output file prefix
         progress (Progress): Rich progress bar instance
         task_id (TaskID): Task ID for progress tracking
-        
+
     Returns:
         Path: Path to saved output file
     """
     output_file = Path(f"{output_prefix}_ground_truth.tsv.gz")
-    
+
     progress.update(task_id, description="Saving ground truth data...")
-    
+
     try:
-        # Sort records by genomic coordinate and read name for deterministic output
-        def sort_key(record):
-            chr_name = record.chr
-            if chr_name.startswith('chr'):
-                chr_part = chr_name[3:]
-            else:
-                chr_part = chr_name
-            
-            try:
-                chr_num = int(chr_part)
-                return (0, chr_num, record.pos, record.name)
-            except ValueError:
-                return (1, chr_part, record.pos, record.name)
-        
-        sorted_records = sorted(records, key=sort_key)
-        
-        # Write header and data
-        with gzip.open(output_file, 'wt') as f:
-            # Write header
-            header = ['chr', 'pos', 'ref', 'alt', 'af', 'raw_vaf', 'target_vaf', 'background_vaf',
-                     'name', 'prob_class_1', 'support_base', 'classified_label']
-            f.write('\t'.join(header) + '\n')
-            
-            # Write data rows
-            for record in sorted_records:
-                row = [
-                    record.chr,
-                    str(record.pos),
-                    record.ref,
-                    record.alt,
-                    f"{record.af:.6f}",
-                    f"{record.raw_vaf:.6f}",
-                    f"{record.target_vaf:.6f}",
-                    f"{record.background_vaf:.6f}",
-                    record.name,
-                    f"{record.prob_class_1:.6f}",
-                    record.support_base,
-                    str(record.classified_label)
-                ]
-                f.write('\t'.join(row) + '\n')
-        
+        df = pl.DataFrame({
+            "chr": [r.chr for r in records],
+            "pos": [r.pos for r in records],
+            "ref": [r.ref for r in records],
+            "alt": [r.alt for r in records],
+            "af": [r.af for r in records],
+            "raw_vaf": [r.raw_vaf for r in records],
+            "target_vaf": [r.target_vaf for r in records],
+            "background_vaf": [r.background_vaf for r in records],
+            "name": [r.name for r in records],
+            "prob_class_1": [r.prob_class_1 for r in records],
+            "support_base": [r.support_base for r in records],
+            "classified_label": [r.classified_label for r in records],
+        })
+
+        # Genomic sort: numeric chromosomes first, then alphabetical
+        chr_raw = pl.col("chr").str.replace("^chr", "")
+        chr_num = chr_raw.cast(pl.Int32, strict=False)
+        df = (
+            df.with_columns(
+                pl.when(chr_num.is_not_null())
+                .then(pl.lit(0))
+                .otherwise(pl.lit(1))
+                .alias("_ord"),
+                chr_num.fill_null(0).alias("_num"),
+                chr_raw.alias("_str"),
+            )
+            .sort("_ord", "_num", "_str", "pos", "name")
+            .drop("_ord", "_num", "_str")
+        )
+
+        with gzip.open(output_file, "wb") as f:
+            df.write_csv(f, separator="\t", float_precision=6)
+
         progress.update(task_id, advance=100)
         console.print(f"[green]✓[/green] Ground truth data saved to: {output_file}")
-        
+
         return output_file
-        
+
     except Exception as e:
         console.print(f"[red]Error saving output file: {e}[/red]")
         raise
